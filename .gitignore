@@ -1,0 +1,17 @@
+# environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# downloaded / generated assets (rebuild with scripts/prepare_assets.py)
+yolov8n.pt
+*.pt
+assets/scene_photo.jpg
+assets/target_sprite.png
+
+# scratch output of scripts/check_project.py
+results/_check/
+
+# keep results/ and results/figures -- they are the deliverable

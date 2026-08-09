@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(uv sync --extra dev)",
+      "PowerShell(uv run python scripts/check_project.py 2>&1)",
+      "PowerShell(uv run pytest 2>&1)"
+    ]
+  }
+}
