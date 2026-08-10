@@ -128,8 +128,13 @@ def test_stage1_attacker_object_reflects_the_last_action(image_env):
 # cannot be bigger than the object it attacks, in any of the three stages.
 
 
-def test_stage1_action_space_caps_size_at_the_targets_own_dimension(image_env):
-    target_min_dim = 2.0 * min(image_env._world.target().half_extents)
+def test_stage1_action_space_caps_size_at_the_targets_own_silhouette(image_env):
+    """Bounded by the narrowest row of the target's own silhouette, not its
+    bounding-box width -- a non-rectangular object is not the same width at
+    every height (see rendering.image_renderer.silhouette_min_span)."""
+    from rendering.image_renderer import silhouette_min_span
+
+    target_min_dim = silhouette_min_span(image_env._world.target().sprite)
     max_size = image_env.action_space().high[2]
     assert max_size <= target_min_dim + 1e-6
 
@@ -140,7 +145,9 @@ def test_stage1_max_size_survives_worst_case_rotation(image_env):
     rotation=0, or a 45-degree patch could still spill past the target."""
     import math
 
-    target_min_dim = 2.0 * min(image_env._world.target().half_extents)
+    from rendering.image_renderer import silhouette_min_span
+
+    target_min_dim = silhouette_min_span(image_env._world.target().sprite)
     max_size = float(image_env.action_space().high[2])
     worst_case_footprint = max_size * math.sqrt(2)
     assert worst_case_footprint <= target_min_dim + 1e-6
@@ -163,11 +170,21 @@ def test_stage1_rejects_a_patch_max_frac_above_one(synthetic_cutout_sprite, vict
 
 
 @pytest.mark.parametrize("env_name", ["physics2d_env", "physics3d_env"])
-def test_physics_attacker_patch_never_exceeds_the_targets_own_dimension(env_name, request):
+def test_physics_attacker_patch_never_exceeds_the_targets_own_silhouette(env_name, request):
+    """Bounded by the narrowest row of the target's own silhouette, not its
+    bounding-box width -- same reasoning as the Stage 1 test above."""
+    from rendering.image_renderer import silhouette_min_span
+
     env = request.getfixturevalue(env_name)
     env.reset(seed=0)
     world = env._world
-    target_min_dim = 2.0 * min(world.target().half_extents[:2])
+    target = world.target()
+    min_span_px = silhouette_min_span(target.sprite)
+    if env_name == "physics2d_env":
+        target_min_dim = min_span_px  # Stage 2's world *is* pixel space
+    else:
+        world_per_px = (2.0 * target.half_extents[1]) / target.sprite.height
+        target_min_dim = min_span_px * world_per_px
     attacker_size = 2.0 * min(world.attacker().half_extents[:2])
     assert attacker_size <= target_min_dim + 1e-6
 

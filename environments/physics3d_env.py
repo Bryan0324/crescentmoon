@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
+from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
 from rendering.renderer_3d import Renderer3D, Renderer3DConfig
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -113,7 +113,12 @@ def _build_world(config: Physics3DEnvConfig) -> World:
             )
         )
 
-    target_min_dim = 2.0 * min(half_h * aspect, half_h)
+    # Bounded by the silhouette's narrowest row (in pixels), converted to
+    # world units by the same scale used for target_world_height -- see
+    # rendering.image_renderer.silhouette_min_span for why the bounding box
+    # is not a safe bound for a non-rectangular object.
+    world_per_px = config.target_world_height / target_sprite.height
+    target_min_dim = silhouette_min_span(target_sprite) * world_per_px
     patch_world_size = config.patch_world_frac * target_min_dim
     patch = make_patch_texture(size=256, seed=config.patch_seed)
     s = patch_world_size / 2.0

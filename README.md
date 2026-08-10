@@ -198,14 +198,19 @@ Agent 沒有任何方式取得它。
     判斷。目前的圖庫因此只剩兩個人物物件（`person_0`、`person_1`），沒有
     車輛——巴士被上述兩種問題同時排除了，Stage 2/3 的 obstacle 也就改用
     另一個人物代替。細節見 `docs/DESIGN.md` 第 5 節。
-- **攻擊者的尺寸不能超過目標物件自己的邊界，旋轉也算在內**：patch 邊長
-  永遠是 `patch_max_frac`（Stage 1）/ `patch_frac`（Stage 2）/
-  `patch_world_frac`（Stage 3）乘上 target 自己較窄的那個維度，三個設定值
-  都限制在 `(0, 1]`，建構環境時就會驗證、超過直接 `ValueError`。Stage 1
-  的 patch 還會旋轉，而旋轉正方形的外接框最多可以脹大 √2 倍（45° 時最大），
-  所以算 size 上限前會先把 target 的尺寸除以這個安全係數，確保**旋轉到任何
-  角度**都不會超出 target 的邊界，不是只在旋轉 0° 時成立。細節見
-  `docs/DESIGN.md` 第 5 節「攻擊不能超出目標物件自己的邊界」。
+- **攻擊者的尺寸不能超過目標物件自己的邊界**：patch 邊長永遠是
+  `patch_max_frac`（Stage 1）/ `patch_frac`（Stage 2）/ `patch_world_frac`
+  （Stage 3）乘上 target 自己的「窄度」，三個設定值都限制在 `(0, 1]`，
+  建構環境時就會驗證、超過直接 `ValueError`。這個「窄度」量測過兩版：
+  - 第一版用 target 裁圖的 bounding box 寬度，結果 patch 疊在人物腰部這種
+    比 bounding box 窄的部位時會明顯露出來——bounding box 寬度是整個人
+    最寬那一橫排（例如交叉的雙臂）決定的，不代表其他高度的寬度。
+    改用 `silhouette_min_span()`：掃描裁圖每一橫排的 alpha，取**最窄**
+    那一排的跨距，才是不論疊在哪個高度都不會露出來的量測。
+  - Stage 1 的 patch 還會旋轉，而旋轉正方形的外接框最多可以脹大 √2 倍
+    （45° 時最大），所以算 size 上限前會先把這個「窄度」除以旋轉安全係數，
+    確保**旋轉到任何角度**都不會超出 target 的邊界。
+  細節見 `docs/DESIGN.md` 第 5 節「攻擊不能超出目標物件自己的邊界」。
 - 3D 使用自寫的 pinhole camera + billboard renderer，不是 PyBullet/MuJoCo。
   這是刻意的取捨（prompt 第 24 節要求不要複雜 3D 引擎）：深度排序與遮擋是真的，
   但沒有剛體動力學、沒有旋轉、沒有陰影。

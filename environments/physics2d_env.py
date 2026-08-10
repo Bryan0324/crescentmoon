@@ -23,7 +23,7 @@ import numpy as np
 from PIL import Image
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
+from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
 from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -135,7 +135,10 @@ def _build_world(config: Physics2DEnvConfig) -> World:
             )
         )
 
-    target_min_dim = min(target_sprite.width, target_sprite.height)
+    # Bounded by the silhouette's narrowest row, not the bounding-box width --
+    # see rendering.image_renderer.silhouette_min_span for why the bbox width
+    # is not a safe bound for a non-rectangular object.
+    target_min_dim = silhouette_min_span(target_sprite)
     patch_side = max(1, int(round(config.patch_frac * target_min_dim)))
     patch = make_patch_texture(size=256, seed=config.patch_seed).resize(
         (patch_side, patch_side), Image.BILINEAR

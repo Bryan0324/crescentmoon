@@ -29,7 +29,7 @@ import numpy as np
 from PIL import Image
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
+from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
 from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -132,13 +132,16 @@ class ImageEnvironment(BaseEnvironment):
         # The patch's legal size is bounded by the target's own footprint, not
         # the canvas -- this is what makes "the attack cannot overtake the
         # object's boundary" a property of the action space itself, not a
-        # convention the agent could ignore. "size" is the *pre-rotation* side
-        # length, but a rotated square's axis-aligned footprint grows to
-        # size*(|cos th| + |sin th|), maximised at 45 deg (a square's rotational
-        # symmetry means nothing beyond 45 deg is ever worse). Divide by that
-        # worst-case factor up front so the bound holds at *every* legal
-        # rotation, not just rotation=0.
-        target_min_dim = float(2.0 * min(self._world.target().half_extents))
+        # convention the agent could ignore. Bounded by the silhouette's
+        # narrowest row, not its bounding-box width: a person is not the same
+        # width at every height, and a patch sized to the (wider) bbox can
+        # poke out past the (narrower) waist or ankles. "size" is also the
+        # *pre-rotation* side length, but a rotated square's axis-aligned
+        # footprint grows to size*(|cos th| + |sin th|), maximised at 45 deg (a
+        # square's rotational symmetry means nothing beyond 45 deg is ever
+        # worse). Divide by that worst-case factor too so the bound holds at
+        # *every* legal rotation, not just rotation=0.
+        target_min_dim = silhouette_min_span(self._world.target().sprite)
         worst_theta = math.radians(min(45.0, config.max_rotation_deg))
         rotation_safety = math.cos(worst_theta) + math.sin(worst_theta)
         size_bound_dim = target_min_dim / rotation_safety

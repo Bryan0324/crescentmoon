@@ -18,6 +18,7 @@ __all__ = [
     "resize_rgb",
     "make_patch_texture",
     "load_sprite",
+    "silhouette_min_span",
 ]
 
 
@@ -76,3 +77,30 @@ def load_sprite(
         with Image.open(path) as im:
             return im.convert("RGBA")
     return Image.new("RGBA", fallback_size, (*fallback_color, 255))
+
+
+def silhouette_min_span(sprite: Image.Image, edge_trim: float = 0.03) -> float:
+    """The narrowest horizontal extent of ``sprite``'s own alpha silhouette,
+    in pixels.
+
+    A person (or any non-rectangular cutout) is not the same width at every
+    height -- narrower at the waist than at outstretched-elbow shoulders, for
+    instance. Bounding a patch by the sprite's overall *bounding-box* width
+    lets it be wider than the object actually is wherever the silhouette
+    happens to be narrower, so it visibly pokes out past the object's own
+    edges there. Using the narrowest row instead is the only bound that holds
+    at every height, not just the widest one -- the same reasoning as the
+    rotation safety margin in ``ImageEnvironment`` (worst case, not average
+    case). The top/bottom ``edge_trim`` fraction of rows is excluded: a
+    single antialiased pixel at a hairline or a shoe tip would otherwise make
+    the bound collapse to almost nothing.
+    """
+    alpha = np.asarray(sprite.getchannel("A")) > 127
+    height = alpha.shape[0]
+    lo, hi = int(height * edge_trim), int(height * (1.0 - edge_trim))
+    spans = []
+    for row in alpha[lo:hi]:
+        cols = np.nonzero(row)[0]
+        if len(cols):
+            spans.append(int(cols[-1] - cols[0] + 1))
+    return float(min(spans)) if spans else float(sprite.width)

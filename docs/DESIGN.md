@@ -290,7 +290,7 @@ attacker 這個物件本身仍然可以比 target 大很多。舊版 Stage 1 允
 修法是讓 patch 的合法尺寸**永遠以 target 自己的尺寸為準，不是畫布**：
 
 ```text
-target_min_dim = min(target 的寬, target 的高)
+target_min_dim = target 自己的某個「窄」的量測
 patch 邊長上限 = patch_max_frac × target_min_dim   (patch_max_frac ≤ 1.0)
 ```
 
@@ -313,6 +313,36 @@ Rule 1 的執行方式一樣：規則不是寫在文件裡希望大家遵守，�
   target 的 `half_extents` 動態算出來的——換一張長寬比不同的 target sprite
   （例如以後改成車輛），patch 大小會自動跟著調整，不會有人忘記手動改設定
   而悄悄違反這條規則。
+
+#### target 不是矩形：bounding box 寬度也不是安全的量測
+
+第一版的 `target_min_dim` 用 target 裁圖的 **bounding box** 寬度（`WorldObject.half_extents`
+乘 2）。這在視覺上驗證時被抓到一個問題：把 patch 直接疊在 target 的
+垂直中心（也就是 Stage 2/3 常見的接觸位置）時，patch 明顯從人物的左右兩側
+「露出來」。原因是人的輪廓在不同高度寬度不一樣——bounding box 的寬度是
+整個人最寬的那一橫排（例如交叉的雙臂、聳起的肩膀）決定的，但腰部、雙腿之間
+的實際輪廓比這個寬度窄得多。用 bounding box 寬度當上限，等於允許 patch 在
+「最寬處」剛好合身，卻在其他任何比較窄的高度都放大到超出人物本身。
+
+修法是量測**整張裁圖裡最窄的那一橫排**，而不是 bounding box：
+
+```python
+# rendering/image_renderer.py::silhouette_min_span
+逐一橫排掃描 alpha channel > 127 的像素
+每一排取「最左不透明像素」到「最右不透明像素」的跨距
+target_min_dim = 所有橫排裡最小的跨距
+```
+
+這跟旋轉安全係數是同一種思路：用**最壞情況**而不是「大致上」的量測，
+保證邊界不會在任何情況下被違反，而不是大部分情況下不會。上下各 3% 的
+橫排會被排除（`edge_trim`），否則髮絲、鞋尖這種只有一兩個像素寬的
+反鋸齒邊緣會讓上限塌縮到幾乎是 0。以 `person_0`（202×516px）為例：
+bounding box 寬度 202px，但最窄橫排只有 59px——差距接近 3.4 倍，
+如果沒有這個修正，Stage 2 疊在腰部的 patch 會明顯比實際輪廓寬。
+
+三個 stage 都改用同一個函式：Stage 1／2 直接對像素座標的 sprite 呼叫；
+Stage 3 額外乘上 `target_world_height / sprite.height` 把像素跨距換算成
+世界座標的距離。
 
 #### 旋轉會讓正方形「看起來更寬」，size 上限也要跟著扣掉這個安全邊際
 
@@ -340,9 +370,9 @@ size 上限 = patch_max_frac × size_bound_dim
 這個修正。
 
 `tests/test_world.py` 裡對應的測試：
-`test_stage1_action_space_caps_size_at_the_targets_own_dimension`、
+`test_stage1_action_space_caps_size_at_the_targets_own_silhouette`、
 `test_stage1_max_size_survives_worst_case_rotation`、
-`test_physics_attacker_patch_never_exceeds_the_targets_own_dimension`，
+`test_physics_attacker_patch_never_exceeds_the_targets_own_silhouette`，
 以及三個 `test_*_rejects_a_patch_*_frac_above_one`（確認 > 1.0 一定會被拒絕）。
 
 ## 6. Renderer
