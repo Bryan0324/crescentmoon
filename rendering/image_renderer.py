@@ -17,7 +17,6 @@ __all__ = [
     "to_pil",
     "resize_rgb",
     "make_patch_texture",
-    "paste_patch",
     "load_sprite",
 ]
 
@@ -77,27 +76,3 @@ def load_sprite(
         with Image.open(path) as im:
             return im.convert("RGBA")
     return Image.new("RGBA", fallback_size, (*fallback_color, 255))
-
-
-def paste_patch(
-    base_rgb: np.ndarray,
-    patch_rgba: Image.Image,
-    center_x: float,
-    center_y: float,
-    size: float,
-    rotation_deg: float = 0.0,
-) -> np.ndarray:
-    """Composite ``patch_rgba`` onto ``base_rgb`` at a pixel-space placement.
-
-    Returns a new array; the base image is never mutated (the environment keeps
-    a pristine copy of the clean scene for every reset).
-    """
-    side = max(1, int(round(size)))
-    patch = patch_rgba.resize((side, side), Image.BILINEAR)
-    if rotation_deg:
-        patch = patch.rotate(float(rotation_deg), resample=Image.BILINEAR, expand=True)
-
-    canvas = to_pil(base_rgb).convert("RGBA")
-    top_left = (int(round(center_x - patch.width / 2)), int(round(center_y - patch.height / 2)))
-    canvas.paste(patch, top_left, patch)  # PIL clips placements that hang off-canvas
-    return np.asarray(canvas.convert("RGB"), dtype=np.uint8)

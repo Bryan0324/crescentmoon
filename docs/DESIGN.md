@@ -146,70 +146,96 @@ boundary、movement limit。沒有重力、沒有摩擦、沒有旋轉。
 現實中的物理攻擊是**以物件為單位**的：你可以印一塊板子、舉著它、移動它，
 但你不能「跨物件著色」——不能把攻擊者的像素直接畫進 target 或背景裡，
 唯一能造成的跨物件效果只有**遮擋**（把一個不透明的東西擋在鏡頭前面）。
+這一節描述的設計是在 review 中被明確指出「受限環境接口並未實現、與現實差異
+過大」之後的修正版——最初的 Stage 1/2/3 實作沒有把這件事變成結構性保證。
 
-最初的 Stage 2/3 實作沒有把這件事變成結構性保證：`Renderer2D`/`Renderer3D`
-把 target 的位置、obstacle 的清單、patch 的貼圖都當成建構子參數直接吃進去，
-「target 不會被攻擊者的動作改到」只是因為程式*剛好*沒有寫錯，而不是
-架構上不可能寫錯。`environments/world.py` 把這件事做成第一級的抽象：
+**Stage 1（照片）原本的問題最大**：直接把一張有公車、有好幾個行人的街景照
+當畫布，用 `paste_patch()` 把 patch 貼上去。target 是「YOLO 剛好在這張照片
+裡信心最高的 person」，沒有自己的邊界、沒有自己的貼圖，只是一個鬆散的
+`(x1,y1,x2,y2)` tuple；attacker 的落點可以自由蓋住畫面裡任何東西，
+包括其他沒被追蹤的物件。**Stage 2/3 的問題比較隱性**：`Renderer2D`/
+`Renderer3D` 把 target 的位置、obstacle 的清單、patch 的貼圖都當成建構子
+參數直接吃進去，「target 不會被攻擊者的動作改到」只是因為程式*剛好*
+沒有寫錯，而不是架構上不可能寫錯。
+
+`environments/world.py` 把「場景由物件組成」做成第一級的抽象，
+**三個 stage 現在共用同一個 World/WorldObject 定義**：
 
 ```python
 @dataclass
 class WorldObject:
     id: str
-    kind: Literal["target", "obstacle", "attacker"]
+    kind: Literal["background", "target", "obstacle", "attacker"]
     position: np.ndarray        # 2D：像素座標；3D：世界座標（公尺）
     half_extents: np.ndarray    # 碰撞範圍 / billboard 尺寸
-    sprite: Image.Image         # 這個物件自己的、固定的外觀
+    sprite: Image.Image | None  # 這個物件自己的、固定的外觀
     movable: bool = False       # 只有 attacker 是 True
+    rotation_deg: float = 0.0   # 只有 2D 使用
 
 class World:
+    def background(self) -> WorldObject: ...
     def target(self) -> WorldObject: ...
     def obstacles(self) -> list[WorldObject]: ...
     def attacker(self) -> WorldObject: ...
 ```
 
-`Physics2DEnvironment` / `Physics3DEnvironment` 在建構時把 target、每個
-obstacle、attacker 各自組成一個 `WorldObject`，放進同一個 `World`。之後：
+`ImageEnvironment` / `Physics2DEnvironment` / `Physics3DEnvironment` 在建構
+時把 background、target、每個 obstacle、attacker 各自組成一個
+`WorldObject`，放進同一個 `World`。之後：
 
-- **Physics**（`physics.py::integrate`）只操作 attacker 的 `Body`；
-  obstacle 的碰撞範圍是從 `world.obstacles()` 讀出來的 AABB，本身
-  唯讀，`integrate()` 不會寫回去。
+- **Physics**（`physics.py::integrate`，只有 Stage 2/3 使用）只操作
+  attacker 的 `Body`；obstacle 的碰撞範圍是從 `world.obstacles()` 讀出來
+  的 AABB，本身唯讀，`integrate()` 不會寫回去。Stage 1 沒有物理，
+  attacker 的位置由 action 直接寫入（見下）。
 - **Renderer**（`renderer_2d.py` / `renderer_3d.py`）不再認得
   「target」「obstacle」這些名字，只認得 `world.objects`：
   依序（2D 是固定 paint order；3D 是逐幀依深度排序）把每個物件自己的
   `sprite` 貼在自己的 `position`。畫某個物件，永遠只會動到那個物件自己
-  配置到的像素。
-- `step()` 裡唯一寫入 World 的一行是
-  `self._world.attacker().position = self._body.position`——
-  這是整份程式碼裡**唯一**一處會修改 WorldObject 位置的地方，
-  而且只碰 attacker 自己的物件。
+  配置到的像素；`sprite=None`（純記帳用、沒有自己外觀）的物件會被跳過。
+- 每個 stage 的 `step()` 裡唯一寫入 World 的一行都只碰 attacker 自己的物件：
+  - Stage 1：`attacker.sprite/position/half_extents/rotation_deg = ...`
+    （action 直接決定這一步的放置）
+  - Stage 2/3：`self._world.attacker().position = self._body.position`
+    （物理算完之後才寫回去）
+
+  這是整份程式碼裡**唯一**會修改 WorldObject 的地方。
 
 `tests/test_world.py` 直接斷言這個不變量：跑幾步任意動作後，
 `world.target().position` 與每個 obstacle 的 position 必須和 reset 時完全相同
-（`test_the_attacker_is_the_only_object_that_moves`）。
+（`test_the_attacker_is_the_only_object_that_moves`，涵蓋 Stage 1/2/3 三種環境）。
 
-### Stage 1 為什麼沒有套用 World
+### target 是真的去背，不是矩形裁圖
 
-Stage 1 的輸入是一張真實照片，本來就沒有被切成離散物件（沒有逐物件的
-mask/depth），把它硬套進 `WorldObject` 需要先做物件分割，屬於
-過度工程化（prompt 第 24 節明確要求不要）。Stage 1 的場景其實只有兩個
-「物件」：**背景照片**（固定、agent 不可更動）和**攻擊者 patch**
-（agent 唯一能控制的東西）。`paste_patch()` 只會寫入 patch 自己那塊
-不透明的像素、貼在背景之上，不會去改背景其他像素的顏色——這已經滿足
-「不能跨物件著色」，只是沒有一個顯式的 `World` 類別去描述它。
+只把 World 結構做對還不夠——如果 target 這個物件的「sprite」其實是一個
+包含背景像素的矩形裁圖，那麼「物件邊界」仍然是假的。`scripts/prepare_assets.py`
+改用 `yolov8n-seg.pt`（Ultralytics 的實例分割模型）而不是一般的偵測模型：
+對來源照片跑分割，取信心最高的 instance mask，把這個 mask 直接當成裁圖的
+alpha channel，存成 `assets/target_sprite.png`。結果是一張真正只有該物件
+形狀是不透明的 RGBA 圖——物件的「邊界」就是它自己的輪廓，不是 bounding box。
+
+三個 stage 的 `_build_world()` 都用 `rendering.image_renderer.load_sprite()`
+讀同一張 `target_sprite.png`：Stage 1、2、3 攻擊的是同一個物件、同一個形狀，
+只是背景與 attacker 的操作方式不同。離線（沒有網路/沒有 ultralytics）時退回
+一張橢圓形的合成 alpha cutout（`synthesize_sprite()`），而不是純色矩形，
+讓離線路徑練到的仍然是「非矩形 alpha 合成」這條程式碼路徑。
 
 ## 6. Renderer
 
 - `rendering/image_renderer.py` — patch 貼圖生成（固定 seed 的高對比色塊 + 噪點）
-  與合成；`load_sprite()` 讀取真實裁圖或退回一塊純色作為 fallback。
+  與合成；`load_sprite()` 讀取真實去背裁圖或退回一塊有 alpha 的合成 cutout。
   patch 的**像素是固定的**，agent 優化的是放置。
 - `rendering/renderer_2d.py` — world 座標就是相機像素座標。
-  只認得 `World`：依 `WorldObject.paint_order`（target → obstacle →
-  attacker）依序把每個物件的 sprite 貼上去。
+  完全由 `World` 驅動，包含背景：background/target/obstacle/attacker
+  都是 `world.objects` 裡的一個物件，依 `WorldObject.paint_order`
+  （background → target → obstacle → attacker）依序把每個物件的 sprite
+  貼上去，2D 專屬的 `rotation_deg` 在貼之前套用。`ImageEnvironment`
+  （Stage 1）與 `Physics2DEnvironment`（Stage 2）共用這一個 renderer。
 - `rendering/renderer_3d.py` — 針孔相機在原點看向 +Z，
-  投影 `u = cx + f·x/z`、`v = cy − f·y/z`；每個 `WorldObject` 是一塊
-  billboard，依自己的 `position.z` 由遠到近繪製，物件本身完全不知道
-  自己是「target」還是「obstacle」。
+  投影 `u = cx + f·x/z`、`v = cy − f·y/z`；target/obstacle/attacker 都是
+  `WorldObject`，每個是一塊 billboard，依自己的 `position.z` 由遠到近繪製，
+  物件本身完全不知道自己是「target」還是「obstacle」。背景（天空/地面漸層）
+  仍由 renderer 自己生成並固定畫在最底層——它不是攻擊者能佔據或遮擋的
+  「東西」，只是相機背後的環境，所以沒有必要也做成 `WorldObject`。
 
 3D 沒有引入 PyBullet/MuJoCo/Godot，是因為 prompt 第 24 節明確要求不要複雜 3D 引擎，
 而這個專案真正需要 3D 的地方只有一件事：**深度**。

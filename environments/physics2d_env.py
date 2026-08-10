@@ -23,7 +23,7 @@ from PIL import Image
 
 from models.victim import VictimModel
 from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
-from rendering.renderer_2d import Renderer2D, Renderer2DConfig
+from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
 from .base import BaseEnvironment, Observation, StepResult
@@ -67,6 +67,18 @@ class Physics2DEnvConfig:
 
 def _build_world(config: Physics2DEnvConfig) -> World:
     world = World()
+
+    size = (config.render_size, config.render_size)
+    background = make_background(*size, config.background_seed).convert("RGBA")
+    world.add(
+        WorldObject(
+            id="background",
+            kind="background",
+            position=np.array([config.render_size / 2.0, config.render_size / 2.0]),
+            half_extents=np.array([config.render_size / 2.0, config.render_size / 2.0]),
+            sprite=background,
+        )
+    )
 
     target_sprite = load_sprite(config.target_sprite_path)
     scale = config.target_height / target_sprite.height
@@ -124,11 +136,7 @@ class Physics2DEnvironment(BaseEnvironment):
         self._reward_fn = AttackReward(reward_config)
 
         self._renderer = Renderer2D(
-            Renderer2DConfig(
-                width=config.render_size,
-                height=config.render_size,
-                background_seed=config.background_seed,
-            )
+            Renderer2DConfig(width=config.render_size, height=config.render_size)
         )
         self._world = _build_world(config)
         self._obstacle_boxes = [

@@ -105,10 +105,10 @@ print(inspect.getsource(BaseEnvironment)[:2000])
         ),
         code(
             """
-photo = resolve(cfg["assets"]["photo"])
 sprite = resolve(cfg["assets"]["target_sprite"])
-print("photo :", photo, "->", "OK" if photo.exists() else "MISSING (run scripts/prepare_assets.py)")
-print("sprite:", sprite, "->", "OK" if sprite.exists() else "MISSING (run scripts/prepare_assets.py)")
+print("target sprite:", sprite, "->", "OK" if sprite.exists() else "MISSING (run scripts/prepare_assets.py)")
+print("  a real, background-removed cutout -- every stage's World uses this exact sprite")
+print("  as its 'target' object; scripts/prepare_assets.py segments it out of a source photo")
 """
         ),
         code(
@@ -116,9 +116,10 @@ print("sprite:", sprite, "->", "OK" if sprite.exists() else "MISSING (run script
 victim = build_victim(cfg)          # frozen, pretrained, owned by the environment
 print("victim:", victim.name)
 
-from rendering.image_renderer import load_rgb
-image = load_rgb(photo)
-detections = victim.detect(image)
+from configs.loader import build_stage1_env
+env = build_stage1_env(cfg, victim)   # a World: background + target cutout + attacker
+clean = env.clean_image()
+detections = env.victim_report(clean)   # experimenter-only call -- an agent could not make this
 for d in sorted(detections, key=lambda d: -d.confidence)[:5]:
     print(f"  {d.cls_name:<12} {d.confidence:.3f}  {tuple(round(v) for v in d.bbox)}")
 """
@@ -126,12 +127,19 @@ for d in sorted(detections, key=lambda d: -d.confidence)[:5]:
         md("## Section 3: Visualization"),
         code(
             """
+from PIL import Image
 from evaluation.plots import draw_detections
 
-plt.figure(figsize=(6, 6))
-plt.imshow(draw_detections(image, detections, highlight=cfg["victim"]["target_class"]))
-plt.axis("off")
-plt.title("what the victim sees in the clean photo")
+with Image.open(sprite) as im:
+    cutout = im.convert("RGBA")
+checker = Image.new("RGBA", cutout.size, (235, 235, 235, 255))
+checker.paste(cutout, (0, 0), cutout)
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
+axes[0].imshow(checker); axes[0].axis("off")
+axes[0].set_title("target_sprite.png -- a real cutout, own alpha, own object")
+axes[1].imshow(draw_detections(clean, detections, highlight=cfg["victim"]["target_class"]))
+axes[1].axis("off"); axes[1].set_title("Stage 1's clean World, rendered")
 plt.show()
 """
         ),
@@ -178,7 +186,7 @@ obs = api.reset(seed=0)
 obs, reward, terminated, truncated, info = api.step(api.action_space().sample(np.random.default_rng(0)))
 print("step() ->", f"reward={reward:+.4f}", f"terminated={terminated}", f"truncated={truncated}", info)
 
-for forbidden in ["_victim", "_clean", "_baseline_conf", "render_human", "pop_telemetry"]:
+for forbidden in ["_victim", "_world", "_baseline_conf", "render_human", "pop_telemetry"]:
     try:
         getattr(api, forbidden)
         print(f"{forbidden:<16} LEAKED (this would be a bug)")
@@ -238,9 +246,10 @@ def build_02_stage1() -> nbf.NotebookNode:
 **Question:** can an agent that may only call the Environment API find
 placements that hurt YOLO?
 
-No physics and no RL yet.  The agent proposes `(x, y, size, rotation)`; the
-environment validates it, renders the patch onto the photo, runs the frozen
-victim, and returns one scalar.
+No physics and no RL yet.  The scene is a `World`: a real cutout of one object
+sitting on a plain background.  The agent proposes `(x, y, size, rotation)`
+for its own patch object; the environment validates it, renders the scene,
+runs the frozen victim, and returns one scalar.
 """
         ),
         code(BOOTSTRAP),

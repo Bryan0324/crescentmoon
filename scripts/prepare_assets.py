@@ -1,13 +1,16 @@
 """Fetch/build the two assets every stage needs, then sanity-check the victim.
 
-1. ``assets/scene_photo.jpg``  -- the Stage 1 photo.
-2. ``assets/target_sprite.png`` -- an RGBA cutout of one detected object, used
-   as the target that the 2D/3D worlds place in front of the camera.
+1. ``assets/scene_photo.jpg``    -- a real photo, used only as a segmentation
+   source (no environment renders this photo itself).
+2. ``assets/target_sprite.png``  -- a real, **background-removed** cutout of
+   one object (instance-segmentation mask as the alpha channel, not a
+   bounding-box rectangle). Every stage's ``World`` uses this exact sprite as
+   its ``target`` object, so all three stages attack the same real object,
+   correctly shaped -- an attack can only ever occlude it, never blend into it.
 
-The sprite is produced *by the victim itself*: we run YOLO on the photo, take
-its most confident ``person``, and crop that box.  If the machine is offline we
-fall back to a synthetic scene plus the ColorBlobVictim, so the pipeline still
-runs end to end (with clearly weaker scientific value -- the script says so).
+If the machine is offline we fall back to a synthetic scene plus the
+ColorBlobVictim, so the pipeline still runs end to end (with clearly weaker
+scientific value -- the script says so).
 
     uv run python scripts/prepare_assets.py
 """
@@ -20,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -33,6 +36,8 @@ PHOTO_URLS = [
     "https://ultralytics.com/images/bus.jpg",
     "https://raw.githubusercontent.com/ultralytics/assets/main/im/bus.jpg",
 ]
+
+SEG_WEIGHTS = "yolov8n-seg.pt"
 
 
 def download_photo(dest: Path) -> bool:
@@ -49,7 +54,7 @@ def download_photo(dest: Path) -> bool:
 
 
 def synthesize_photo(dest: Path, size: int = 512) -> None:
-    """Offline fallback: a flat scene with one coloured slab as the 'object'."""
+    """Offline fallback source photo -- only ever fed to the segmenter."""
     print("[assets] building a synthetic scene instead (offline fallback)")
     frame = make_background(size, size, seed=1).convert("RGB")
     slab = Image.new("RGB", (130, 280), (0, 200, 0))
@@ -58,54 +63,78 @@ def synthesize_photo(dest: Path, size: int = 512) -> None:
     frame.save(dest)
 
 
-def crop_sprite(photo: Path, sprite_path: Path, cfg: dict) -> bool:
-    """Crop the victim's most confident target out of the photo."""
+def segment_sprite(photo: Path, sprite_path: Path, cfg: dict) -> bool:
+    """Cut the victim's most confident target out of the photo by its own
+    silhouette, using instance segmentation -- not a bounding-box rectangle.
+
+    A rectangular crop would include background pixels inside the box, which
+    is not what a real, physically-cut board/sticker of "the object" would
+    ever look like. The segmentation mask becomes the alpha channel instead,
+    so the sprite's own opaque pixels are exactly the object's own shape.
+    """
     try:
-        from models.yolo_victim import YOLOVictim
+        from ultralytics import YOLO
     except Exception as exc:  # pragma: no cover
         print(f"[assets] ultralytics unavailable: {exc}")
         return False
 
     try:
-        victim = YOLOVictim(
-            weights=cfg["victim"]["weights"],
-            conf_threshold=0.2,
-            imgsz=640,
-            device=cfg["victim"].get("device", "cpu"),
-        )
+        model = YOLO(SEG_WEIGHTS)
     except Exception as exc:  # pragma: no cover - typically a download failure
-        print(f"[assets] could not load YOLO weights: {exc}")
+        print(f"[assets] could not load segmentation weights {SEG_WEIGHTS}: {exc}")
         return False
 
     image = load_rgb(photo)
-    detections = victim.detect(image)
     target_class = cfg["victim"].get("target_class", "person")
-    best = detections.best(target_class) or detections.best()
-    if best is None:
-        print("[assets] YOLO found nothing in the photo")
+    results = model.predict(image[:, :, ::-1], conf=0.2, verbose=False)[0]
+    if results.masks is None or len(results.boxes) == 0:
+        print("[assets] segmentation found nothing in the photo")
         return False
 
-    x1, y1, x2, y2 = (int(round(v)) for v in best.bbox)
-    pad_x = int(0.06 * (x2 - x1))
-    pad_y = int(0.04 * (y2 - y1))
-    x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-    x2 = min(image.shape[1], x2 + pad_x)
-    y2 = min(image.shape[0], y2 + pad_y)
+    names = model.names
+    cls_ids = results.boxes.cls.cpu().numpy().astype(int)
+    confs = results.boxes.conf.cpu().numpy()
+    matches = [i for i, c in enumerate(cls_ids) if names.get(int(c), "") == target_class]
+    best_idx = int(max(matches, key=lambda i: confs[i])) if matches else int(confs.argmax())
+    best_conf = float(confs[best_idx])
+    best_cls = names.get(int(cls_ids[best_idx]), str(cls_ids[best_idx]))
 
-    crop = image[y1:y2, x1:x2]
-    rgba = np.dstack([crop, np.full(crop.shape[:2] + (1,), 255, dtype=np.uint8)])
+    mask = results.masks.data[best_idx].cpu().numpy()  # (Hm, Wm) in [0, 1], model resolution
+    mask_full = np.asarray(
+        Image.fromarray((mask * 255).astype(np.uint8)).resize(
+            (image.shape[1], image.shape[0]), Image.BILINEAR
+        )
+    )
+
+    x1, y1, x2, y2 = (int(round(v)) for v in results.boxes.xyxy[best_idx].tolist())
+    pad = 4
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = min(image.shape[1], x2 + pad), min(image.shape[0], y2 + pad)
+
+    crop_rgb = image[y1:y2, x1:x2]
+    crop_alpha = mask_full[y1:y2, x1:x2]
+    rgba = np.dstack([crop_rgb, crop_alpha])
+
     sprite_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgba, mode="RGBA").save(sprite_path)
+    opaque_frac = float((crop_alpha > 127).mean())
     print(
-        f"[assets] sprite = {best.cls_name} @ conf {best.confidence:.3f}, "
-        f"{crop.shape[1]}x{crop.shape[0]} -> {sprite_path}"
+        f"[assets] sprite = {best_cls} @ conf {best_conf:.3f}, "
+        f"{crop_rgb.shape[1]}x{crop_rgb.shape[0]}, "
+        f"{opaque_frac:.0%} of the crop is the real silhouette -> {sprite_path}"
     )
     return True
 
 
 def synthesize_sprite(sprite_path: Path) -> None:
-    print("[assets] building a synthetic sprite instead (offline fallback)")
-    sprite = Image.new("RGBA", (130, 280), (0, 200, 0, 255))
+    """Offline fallback: an oval alpha-matte cutout, not a rectangle -- so
+    even the offline path exercises a non-rectangular sprite boundary."""
+    print("[assets] building a synthetic cutout instead (offline fallback)")
+    size = (130, 280)
+    sprite = Image.new("RGBA", size, (0, 200, 0, 0))
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).ellipse([6, 6, size[0] - 6, size[1] - 6], fill=255)
+    sprite.putalpha(mask)
     sprite_path.parent.mkdir(parents=True, exist_ok=True)
     sprite.save(sprite_path)
 
@@ -117,24 +146,24 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    photo = resolve(cfg["assets"]["photo"])
+    photo = resolve(cfg["assets"]["source_photo"])
     sprite = resolve(cfg["assets"]["target_sprite"])
 
     if args.force or not photo.exists():
         if not download_photo(photo):
             synthesize_photo(photo)
     else:
-        print(f"[assets] photo already present: {photo}")
+        print(f"[assets] source photo already present: {photo}")
 
     if args.force or not sprite.exists():
-        if not crop_sprite(photo, sprite, cfg):
+        if not segment_sprite(photo, sprite, cfg):
             synthesize_sprite(sprite)
     else:
         print(f"[assets] sprite already present: {sprite}")
 
     print("\n[assets] done.")
-    print(f"  photo : {photo}  ({'ok' if photo.exists() else 'MISSING'})")
-    print(f"  sprite: {sprite} ({'ok' if sprite.exists() else 'MISSING'})")
+    print(f"  source photo  : {photo}  ({'ok' if photo.exists() else 'MISSING'})")
+    print(f"  target sprite : {sprite} ({'ok' if sprite.exists() else 'MISSING'})")
     return 0
 
 

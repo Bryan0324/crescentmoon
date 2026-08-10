@@ -1,10 +1,21 @@
 """Stage 1 -- ImageEnvironment.
 
-A photo wrapped in the Environment API.  No physics, no RL: the point is to
-prove that an agent restricted to ``observe() / step() / action_space()`` can
-still find placements that hurt the victim model.
+A real, alpha-matted cutout of one object (see ``scripts/prepare_assets.py``)
+sitting on a plain backdrop, wrapped in the Environment API. No physics, no
+RL: the point is to prove that an agent restricted to
+``observe() / step() / action_space()`` can still find placements that hurt
+the victim model.
 
-    agent -> action -> validate -> render attacked image -> YOLO -> reward -> agent
+    agent -> action -> validate -> render attacked scene -> YOLO -> reward -> agent
+
+The scene is a :class:`~environments.world.World` of independent objects --
+background, target, attacker -- exactly like Stage 2, just without physics
+driving the attacker: the agent's action *is* the attacker's placement for
+that step, instead of a push integrated by ``environments.physics``. Nothing
+in this module ever writes to the target's or the background's position or
+sprite; the only thing ``step()`` ever changes is the attacker's own object,
+and the only cross-object effect is occlusion by paint order (see
+``rendering/renderer_2d.py``).
 """
 
 from __future__ import annotations
@@ -14,23 +25,30 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_rgb, make_patch_texture, paste_patch, resize_rgb
+from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
+from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
 from .base import BaseEnvironment, Observation, StepResult
 from .spaces import BoxSpace, DictSpace, ImageSpace
+from .world import World, WorldObject
 
 __all__ = ["ImageEnvConfig", "ImageEnvironment"]
 
 
 @dataclass
 class ImageEnvConfig:
-    photo_path: str | Path
+    target_sprite_path: str | Path | None  # a real, background-removed cutout (RGBA)
     render_size: int = 512          # resolution the victim model sees
     obs_size: int = 64              # resolution the agent sees (a coarse camera)
     target_class: str | None = "person"
+    target_center: tuple[float, float] = (256.0, 290.0)
+    target_height: int = 250
+    background_seed: int = 0
+
     patch_seed: int = 0
     patch_min_frac: float = 0.10    # patch side, as a fraction of render_size
     patch_max_frac: float = 0.32
@@ -39,8 +57,51 @@ class ImageEnvConfig:
     match_iou: float = 0.2
 
 
+def _build_world(config: ImageEnvConfig) -> World:
+    world = World()
+
+    background = make_background(config.render_size, config.render_size, config.background_seed)
+    world.add(
+        WorldObject(
+            id="background",
+            kind="background",
+            position=np.array([config.render_size / 2.0, config.render_size / 2.0]),
+            half_extents=np.array([config.render_size / 2.0, config.render_size / 2.0]),
+            sprite=background.convert("RGBA"),
+        )
+    )
+
+    target_sprite = load_sprite(config.target_sprite_path)
+    scale = config.target_height / target_sprite.height
+    target_sprite = target_sprite.resize(
+        (max(1, int(target_sprite.width * scale)), config.target_height), Image.BILINEAR
+    )
+    world.add(
+        WorldObject(
+            id="target",
+            kind="target",
+            position=np.asarray(config.target_center, dtype=float),
+            half_extents=np.array([target_sprite.width / 2.0, target_sprite.height / 2.0]),
+            sprite=target_sprite,
+        )
+    )
+
+    world.add(
+        WorldObject(
+            id="attacker",
+            kind="attacker",
+            position=np.zeros(2),
+            half_extents=np.array([1.0, 1.0]),
+            sprite=make_patch_texture(size=8, seed=config.patch_seed),  # replaced every step
+            movable=True,
+        )
+    )
+    return world
+
+
 class ImageEnvironment(BaseEnvironment):
-    """Place a physical-looking patch on a photo; the environment does the rest."""
+    """Place a physical-looking patch in front of a target object; the
+    environment renders the scene and does the rest."""
 
     def __init__(
         self,
@@ -52,9 +113,11 @@ class ImageEnvironment(BaseEnvironment):
         self._victim = victim
         self._reward_fn = AttackReward(reward_config)
 
-        photo = load_rgb(config.photo_path)
-        self._clean = resize_rgb(photo, config.render_size)
-        self._patch = make_patch_texture(size=256, seed=config.patch_seed)
+        self._renderer = Renderer2D(
+            Renderer2DConfig(width=config.render_size, height=config.render_size)
+        )
+        self._world = _build_world(config)
+        self._patch_texture = make_patch_texture(size=256, seed=config.patch_seed)
 
         side = float(config.render_size)
         self._action_space = BoxSpace(
@@ -81,7 +144,7 @@ class ImageEnvironment(BaseEnvironment):
         )
 
         self._rng = np.random.default_rng(0)
-        self._current: np.ndarray = self._clean.copy()
+        self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_valid = 1.0
         self._last_action_norm = np.zeros(4, dtype=np.float64)
@@ -104,17 +167,17 @@ class ImageEnvironment(BaseEnvironment):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        self._current = self._clean.copy()
+        self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_valid = 1.0
         self._last_action_norm = np.zeros(4, dtype=np.float64)
 
-        detections = self._victim.detect(self._clean)
+        detections = self._victim.detect(self._frame)
         target = detections.best(self._config.target_class) or detections.best()
         if target is None:
             raise RuntimeError(
-                f"victim '{self._victim.name}' found nothing in {self._config.photo_path}; "
-                "pick another photo or lower the victim's confidence threshold"
+                f"victim '{self._victim.name}' found nothing in the clean scene; "
+                f"check {self._config.target_sprite_path} or lower the confidence threshold"
             )
         self._baseline_conf = target.confidence
         self._baseline_bbox = target.bbox
@@ -140,7 +203,7 @@ class ImageEnvironment(BaseEnvironment):
             dtype=np.float32,
         )
         return {
-            "image": resize_rgb(self._current, cfg.obs_size),
+            "image": resize_rgb(self._frame, cfg.obs_size),
             "vector": vector,
         }
 
@@ -157,11 +220,17 @@ class ImageEnvironment(BaseEnvironment):
         invalid = not self._action_space.contains(requested)
         x, y, size, rotation = applied
 
-        # --- world update + render ---------------------------------------
-        self._current = paste_patch(self._clean, self._patch, x, y, size, rotation)
+        # --- world update: only the attacker's own object changes --------
+        side = max(1, int(round(size)))
+        attacker = self._world.attacker()
+        attacker.sprite = self._patch_texture.resize((side, side), Image.BILINEAR)
+        attacker.position = np.array([x, y])
+        attacker.half_extents = np.array([side / 2.0, side / 2.0])
+        attacker.rotation_deg = float(rotation)
 
-        # --- victim model -------------------------------------------------
-        detections = self._victim.detect(self._current)
+        # --- render -> victim model ----------------------------------------
+        self._frame = self._renderer.render(self._world)
+        detections = self._victim.detect(self._frame)
         match = detections.best_matching(
             self._baseline_bbox, self._baseline_class, cfg.match_iou
         )
@@ -207,10 +276,10 @@ class ImageEnvironment(BaseEnvironment):
     # experimenter-facing (sealed off from agents)
     # ------------------------------------------------------------------
     def render_human(self) -> np.ndarray:
-        return self._current.copy()
+        return self._frame.copy()
 
     def clean_image(self) -> np.ndarray:
-        return self._clean.copy()
+        return self._renderer.render(self._world.excluding("attacker"))
 
     def victim_report(self, image_rgb: np.ndarray):
         return self._victim.detect(image_rgb)

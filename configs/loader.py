@@ -80,12 +80,16 @@ def _target_class(cfg: dict[str, Any]) -> str | None:
 # ----------------------------------------------------------------------
 def build_stage1_env(cfg: dict[str, Any], victim: VictimModel) -> ImageEnvironment:
     s = cfg["stage1"]
+    sprite = resolve(cfg["assets"]["target_sprite"])
     return ImageEnvironment(
         ImageEnvConfig(
-            photo_path=resolve(cfg["assets"]["photo"]),
+            target_sprite_path=str(sprite) if sprite.exists() else None,
             render_size=int(s["render_size"]),
             obs_size=int(s["obs_size"]),
             target_class=_target_class(cfg),
+            target_center=tuple(s["target_center"]),
+            target_height=int(s["target_height"]),
+            background_seed=int(s["background_seed"]),
             patch_min_frac=float(s["patch_min_frac"]),
             patch_max_frac=float(s["patch_max_frac"]),
             max_rotation_deg=float(s["max_rotation_deg"]),

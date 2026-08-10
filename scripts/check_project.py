@@ -30,7 +30,7 @@ from environments.physics3d_env import Physics3DEnvConfig, Physics3DEnvironment 
 from environments.sealed import EnvironmentAccessError, seal  # noqa: E402
 from evaluation.runner import run_episodes  # noqa: E402
 from models.stub_victim import ColorBlobVictim  # noqa: E402
-from rendering.renderer_2d import make_background  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 
 PASS, FAIL = "  ok  ", " FAIL "
 _failures: list[str] = []
@@ -50,25 +50,28 @@ def check(name: str, fn):
 
 
 # ----------------------------------------------------------------------
-def _tiny_photo(tmp: Path) -> Path:
-    from PIL import Image
-
-    path = tmp / "check_photo.jpg"
-    frame = make_background(192, 192, seed=5).convert("RGB")
-    frame.paste(Image.new("RGB", (56, 110), (0, 200, 0)), (68, 45))
-    frame.save(path)
+def _tiny_cutout(tmp: Path) -> Path:
+    path = tmp / "check_cutout.png"
+    size = (56, 110)
+    sprite = Image.new("RGBA", size, (0, 200, 0, 0))
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).ellipse([3, 3, size[0] - 3, size[1] - 3], fill=255)
+    sprite.putalpha(mask)
+    sprite.save(path)
     return path
 
 
 def build_environments(tmp: Path):
-    photo = _tiny_photo(tmp)
+    cutout = _tiny_cutout(tmp)
     return {
         "ImageEnvironment": ImageEnvironment(
             ImageEnvConfig(
-                photo_path=photo,
+                target_sprite_path=cutout,
                 render_size=160,
                 obs_size=32,
                 target_class="target",
+                target_center=(80.0, 88.0),
+                target_height=80,
                 patch_min_frac=0.25,
                 patch_max_frac=0.6,
             ),
@@ -161,7 +164,7 @@ def main() -> int:
     print("\nassets and results on disk")
     if cfg:
         for label, path in [
-            ("photo", resolve(cfg["assets"]["photo"])),
+            ("source photo", resolve(cfg["assets"]["source_photo"])),
             ("target sprite", resolve(cfg["assets"]["target_sprite"])),
             ("results dir", resolve(cfg["output"]["results_dir"])),
             ("figures dir", resolve(cfg["output"]["figures_dir"])),
@@ -230,9 +233,9 @@ def _yolo_smoke(cfg, tmp: Path) -> str:
     from rendering.image_renderer import load_rgb
 
     victim = build_victim(cfg)
-    photo = resolve(cfg["assets"]["photo"])
+    photo = resolve(cfg["assets"]["source_photo"])
     if not photo.exists():
-        return f"{victim.name} loaded (no photo yet -- run scripts/prepare_assets.py)"
+        return f"{victim.name} loaded (no source photo yet -- run scripts/prepare_assets.py)"
     target_class = cfg["victim"].get("target_class")
     detections = victim.detect(load_rgb(photo))
     best = detections.best(target_class)

@@ -44,7 +44,7 @@ uv sync --extra dev
 # 2. 專案健康檢查：三個 Environment、存取規則、Agent 都能跑（不需 YOLO、幾秒鐘）
 uv run python scripts/check_project.py
 
-# 3. 準備素材：下載照片 + 用 YOLO 自己切出 target sprite
+# 3. 準備素材：下載來源照片 + 用 YOLOv8-seg 對它做實例分割，去背切出 target sprite
 uv run python scripts/prepare_assets.py
 
 # 4. 逐階段跑實驗
@@ -156,13 +156,16 @@ Agent 沒有任何方式取得它。
 
 ## 已知限制
 
-- Stage 2/3 的場景是 `environments/world.py` 裡一個由 `WorldObject`
-  （target / obstacle / attacker）組成的 `World`：每個物件有自己的位置與貼圖，
-  攻擊者的 action 只能移動自己那個物件，物理與 renderer 都不會、也無法去改
-  target 或 obstacle 的像素——這是為了符合「現實攻擊以物件為單位，無法跨物件
-  著色」而做的結構性保證，細節見 `docs/DESIGN.md` 第 5 節。
-  Stage 1 因為輸入是未分割的真實照片，沒有套用同一個 `World` 類別，
-  但保留一樣的性質：`paste_patch()` 只寫入攻擊者自己的不透明像素。
+- **三個 stage 的場景都是**`environments/world.py` 裡一個由 `WorldObject`
+  （background / target / obstacle / attacker）組成的 `World`：每個物件有
+  自己的位置與貼圖，攻擊者的 action 只能移動自己那個物件，物理與 renderer
+  都不會、也無法去改 target 或 obstacle 的像素——這是為了符合「現實攻擊以
+  物件為單位，無法跨物件著色」而做的結構性保證，細節見 `docs/DESIGN.md` 第 5 節。
+- **target 是真正去背的物件**，不是 bounding-box 矩形裁圖：
+  `scripts/prepare_assets.py` 用 YOLOv8-seg 對來源照片做實例分割，把該物件的
+  segmentation mask 當作 alpha channel，存成 `assets/target_sprite.png`。
+  三個 stage 共用同一張 sprite，所以「target 這個物件」在 Stage 1/2/3 裡
+  形狀一致、邊界就是它自己的輪廓，攻擊者只能遮擋它，不能把像素畫進它的輪廓裡。
 - 3D 使用自寫的 pinhole camera + billboard renderer，不是 PyBullet/MuJoCo。
   這是刻意的取捨（prompt 第 24 節要求不要複雜 3D 引擎）：深度排序與遮擋是真的，
   但沒有剛體動力學、沒有旋轉、沒有陰影。
@@ -170,7 +173,7 @@ Agent 沒有任何方式取得它。
   Agent 優化的是放置與移動，不是像素。這正是「物理可行」的定義所要求的。
 - PPO 的預算刻意調小（CPU 可跑完）。要更漂亮的曲線就把
   `configs/default.yaml` 裡的 `total_timesteps` 調大。
-- 2D/3D 場景的背景是程序生成的低紋理背景，target 是從照片裁出來的 sprite。
-  這讓 reward 訊號乾淨，但場景比真實照片單純。
+- 三個 stage 的背景都是程序生成的低紋理背景（`make_background()`），
+  這讓 reward 訊號乾淨（YOLO 不會被背景裡其他物件干擾），但場景比真實街景單純。
 
 細節見 [docs/DESIGN.md](docs/DESIGN.md)，實驗結果見 [docs/RESULTS.md](docs/RESULTS.md)。

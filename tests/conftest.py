@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -13,18 +13,22 @@ from environments.image_env import ImageEnvConfig, ImageEnvironment  # noqa: E40
 from environments.physics2d_env import Physics2DEnvConfig, Physics2DEnvironment  # noqa: E402
 from environments.physics3d_env import Physics3DEnvConfig, Physics3DEnvironment  # noqa: E402
 from models.stub_victim import ColorBlobVictim  # noqa: E402
-from rendering.renderer_2d import make_background  # noqa: E402
 
 # The whole test suite runs on the deterministic stub victim: no weights, no
 # network, and confidence that decreases monotonically with occlusion.
 
 
 @pytest.fixture(scope="session")
-def synthetic_photo(tmp_path_factory) -> Path:
-    path = tmp_path_factory.mktemp("assets") / "photo.jpg"
-    frame = make_background(256, 256, seed=3).convert("RGB")
-    frame.paste(Image.new("RGB", (70, 140), (0, 200, 0)), (93, 60))
-    frame.save(path)
+def synthetic_cutout_sprite(tmp_path_factory) -> Path:
+    """A real, non-rectangular alpha-matte cutout -- like scripts/prepare_assets.py
+    produces via segmentation, just synthetic so tests need no network or model."""
+    path = tmp_path_factory.mktemp("assets") / "target_sprite.png"
+    size = (70, 140)
+    sprite = Image.new("RGBA", size, (0, 200, 0, 0))
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).ellipse([4, 4, size[0] - 4, size[1] - 4], fill=255)
+    sprite.putalpha(mask)
+    sprite.save(path)
     return path
 
 
@@ -34,13 +38,15 @@ def victim() -> ColorBlobVictim:
 
 
 @pytest.fixture
-def image_env(synthetic_photo, victim) -> ImageEnvironment:
+def image_env(synthetic_cutout_sprite, victim) -> ImageEnvironment:
     return ImageEnvironment(
         ImageEnvConfig(
-            photo_path=synthetic_photo,
+            target_sprite_path=synthetic_cutout_sprite,
             render_size=192,
             obs_size=32,
             target_class="target",
+            target_center=(96.0, 105.0),
+            target_height=95,
             patch_min_frac=0.2,
             patch_max_frac=0.6,
             max_steps=1,

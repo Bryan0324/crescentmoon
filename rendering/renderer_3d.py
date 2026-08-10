@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
 
-from environments.world import World
 from .renderer_2d import make_background
+
+if TYPE_CHECKING:  # avoid a runtime rendering -> environments -> rendering cycle
+    from environments.world import World
 
 __all__ = ["Renderer3DConfig", "Renderer3D"]
 

@@ -10,10 +10,13 @@ structural instead of incidental. Physics only ever moves the object flagged
 its own position. There is no operation anywhere that lets one object's pixels
 bleed into another's -- the World simply has no such method.
 
-Used by ``Physics2DEnvironment`` and ``Physics3DEnvironment``. Stage 1 has no
-physics and no discrete objects to begin with (a photograph is not
-pre-segmented) -- see the module docstring of ``environments/image_env.py``
-for how the same invariant holds there without a World.
+Used by every 2D stage -- ``ImageEnvironment`` (Stage 1), ``Physics2DEnvironment``
+(Stage 2) -- and by ``Physics3DEnvironment`` (Stage 3). The target is a real,
+alpha-matted cutout of one photographed object (see
+``scripts/prepare_assets.py``), not a bounding-box rectangle: its own sprite
+*is* its own silhouette, so "the attacker's object" and "the target's object"
+never share a pixel unless the attacker is genuinely drawn on top of it --
+exactly the one effect a physical occluder is allowed to have.
 """
 
 from __future__ import annotations
@@ -26,13 +29,13 @@ from PIL import Image
 
 __all__ = ["ObjectKind", "WorldObject", "World"]
 
-ObjectKind = Literal["target", "obstacle", "attacker"]
+ObjectKind = Literal["background", "target", "obstacle", "attacker"]
 
-# Paint order when there is no real depth to sort by (the 2D stage): later
+# Paint order when there is no real depth to sort by (the 2D stages): later
 # kinds are drawn on top of earlier ones, so the attacker -- the only object
 # that can occlude anything -- is always nearest the lens. The 3D stage
 # ignores this and depth-sorts every frame instead (see Renderer3D.render).
-_PAINT_ORDER: dict[ObjectKind, int] = {"target": 0, "obstacle": 1, "attacker": 2}
+_PAINT_ORDER: dict[ObjectKind, int] = {"background": 0, "target": 1, "obstacle": 2, "attacker": 3}
 
 
 @dataclass
@@ -49,6 +52,9 @@ class WorldObject:
     half_extents: np.ndarray   # n-dim: collision footprint / billboard half-size
     sprite: Image.Image        # RGBA -- this object's own, fixed appearance
     movable: bool = False
+    #: 2D-only: rotation applied to the sprite before it is pasted. 3D objects
+    #: leave this at 0 -- depth and projection are handled by Renderer3D instead.
+    rotation_deg: float = 0.0
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, dtype=np.float64)
@@ -84,6 +90,9 @@ class World:
     def objects(self) -> list[WorldObject]:
         """Every object, in paint order (2D) / arbitrary order (3D depth-sorts itself)."""
         return sorted(self._objects.values(), key=lambda obj: obj.paint_order)
+
+    def background(self) -> WorldObject:
+        return self.of_kind("background")[0]
 
     def target(self) -> WorldObject:
         return self.of_kind("target")[0]

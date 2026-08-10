@@ -5,7 +5,12 @@ project: crescentmoon
 seed: 0
 
 assets:
-  photo: assets/scene_photo.jpg
+  # A real photo used only to segment the target cutout below -- no
+  # environment renders this photo itself any more.
+  source_photo: assets/scene_photo.jpg
+  # A real, background-removed (alpha-matted) cutout of one object, produced
+  # by scripts/prepare_assets.py via instance segmentation. Every stage uses
+  # this same sprite as its "target" WorldObject.
   target_sprite: assets/target_sprite.png
 
 victim:
@@ -27,6 +32,9 @@ reward:
 stage1:
   render_size: 512
   obs_size: 64
+  target_center: [256.0, 290.0]
+  target_height: 250
+  background_seed: 0
   patch_min_frac: 0.12     # patch side as a fraction of the image side
   patch_max_frac: 0.45     # a big physical board is allowed -- but costs more
   max_rotation_deg: 90.0
