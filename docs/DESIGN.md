@@ -204,20 +204,78 @@ class World:
 `world.target().position` 與每個 obstacle 的 position 必須和 reset 時完全相同
 （`test_the_attacker_is_the_only_object_that_moves`，涵蓋 Stage 1/2/3 三種環境）。
 
-### target 是真的去背，不是矩形裁圖
+### 物件圖庫：target 是真的去背，不是矩形裁圖
 
 只把 World 結構做對還不夠——如果 target 這個物件的「sprite」其實是一個
 包含背景像素的矩形裁圖，那麼「物件邊界」仍然是假的。`scripts/prepare_assets.py`
-改用 `yolov8n-seg.pt`（Ultralytics 的實例分割模型）而不是一般的偵測模型：
-對來源照片跑分割，取信心最高的 instance mask，把這個 mask 直接當成裁圖的
-alpha channel，存成 `assets/target_sprite.png`。結果是一張真正只有該物件
-形狀是不透明的 RGBA 圖——物件的「邊界」就是它自己的輪廓，不是 bounding box。
+改用 `yolov8n-seg.pt`（Ultralytics 的實例分割模型）而不是一般的偵測模型，
+而且不再只切一張圖，而是對每張來源照片跑分割、把**每一個**夠完整、夠有
+信心的 instance 都去背切出來，組成一個小型物件圖庫：
 
-三個 stage 的 `_build_world()` 都用 `rendering.image_renderer.load_sprite()`
-讀同一張 `target_sprite.png`：Stage 1、2、3 攻擊的是同一個物件、同一個形狀，
-只是背景與 attacker 的操作方式不同。離線（沒有網路/沒有 ultralytics）時退回
-一張橢圓形的合成 alpha cutout（`synthesize_sprite()`），而不是純色矩形，
-讓離線路徑練到的仍然是「非矩形 alpha 合成」這條程式碼路徑。
+```text
+assets/
+  source/            來源照片，只餵給分割模型；任何 Environment 都不會直接渲染它
+  objects/           去背裁圖，每個真實物件一張 RGBA PNG
+  objects.json       索引：[{id, class, file, confidence, source}, ...]
+```
+
+`configs/objects.py::ObjectLibrary` 負責查詢——用物件 id（`"person_0"`）
+或 class 名稱（`"person"`，取該 class 信心最高的那個）都可以。
+每張裁圖的 alpha channel 直接來自該 instance 的 segmentation mask，
+不是 bounding box：物件的「邊界」就是它自己的輪廓。
+
+**Stage 1 只從圖庫挑一個物件當攻擊目標**（`stage1.target_object`）——場景
+就是「這一個物件 + 攻擊者」，對應 prompt 的「先驗證單一物件是否能被攻擊」。
+**Stage 2/3 的場景由圖庫裡多個物件組成**：除了 target，`obstacles` 清單
+裡的每一項也是圖庫裡一個真實物件（目前是另一個人物 `person_1`——圖庫裡
+唯一通過完整性檢查的車輛只有巴士，而它被排除了，見下一節），用和 target 一樣的方式
+放進場景——自己的 center + 顯示高度（`Physics2DEnvironment`/
+`Physics3DEnvironment` 的 `_build_world()` 對 target 和每個 obstacle
+呼叫同一套 `load_sprite() → 依高度縮放 → 建立 WorldObject` 邏輯，沒有兩套
+程式碼）。離線（沒有網路/沒有 ultralytics）時退回兩張橢圓形的合成 alpha
+cutout（`build_offline_library()`），而不是純色矩形，讓離線路徑練到的
+仍然是「非矩形 alpha 合成、多物件組成場景」這條程式碼路徑。
+
+### 圖庫會過濾「不完整」的物件
+
+第一版分割出來的 instance 裡，有些明顯「不完整」——不是遮罩雜訊，是物件
+本身就缺了一塊。實際檢查 bus.jpg + zidane.jpg 分割出的 8 個 instance，
+發現三種不同成因，處理方式也不一樣：
+
+**1. 被照片邊框切掉。** zidane.jpg 是半身特寫，兩位主角的 bounding box
+下緣幾乎貼齊照片底部（`y2 = 712/720`、`709/720`）——不是分割演算法漏切
+了腿，是那段畫面在照片裡根本不存在。用這種裁圖當「物件」放進合成場景，
+會是一個懸空的半身軀幹。更隱蔽的例子：bus.jpg 裡信心最高的 person
+（0.878）bbox 右緣正好卡在照片右邊界（`x2 = 810/810`）——伸出去的那隻手
+被裁掉了，乍看仍是完整的人形，實際上手臂不見了。這類問題用一個**四邊都檢查**
+的邊界過濾解決（`BORDER_MARGIN = 0.02`：bbox 任一邊落在照片寬/高 2% 以內
+就丟棄）——第一版只檢查上下邊界，這個右手被裁掉的案例就是後來才發現漏掉
+左右邊的教訓。
+
+**2. 整體被嚴重遮擋，只剩一小塊。** bus.jpg 裡有一個 person instance
+信心只有 0.412（其他 person 都在 0.84 以上），去背後只剩一小條軀幹/
+手臂。這類交給信心門檻擋住：`MIN_CONFIDENCE = 0.6`。
+
+**3. 被畫面中「站在它前面」的東西挖了一個洞。** bus.jpg 裡有三個人站在
+巴士前面，巴士的分割遮罩因此被挖出三個人形的洞——遮罩本身是對的（那些
+像素真的屬於人、不屬於巴士），但拿來當一個獨立「物件」使用時，觀感上明顯
+缺了一塊。這一類**沒有**用幾何方法自動偵測：我們試過一種作法（把遮罩內
+「被自己輪廓完全包住、摸不到邊界」的背景區域，跟其他 instance 的真實遮罩
+做比對，只有兩者重疊時才算真的被遮擋），結果並不可靠——在 bus.jpg 上，
+明顯缺了三個人形洞的巴士算出來的分數（18.8%），反而比人工確認完整的人物
+（16.4%～36.6%）還要低：一個人交叉雙臂、雙腿分開產生的「自己身體圍起來的
+背景空隙」，跟真的被別的物件遮擋，在純幾何上很難分辨。要可靠判斷「這看起來
+像不像一個完整物件」需要真正的影像理解，對一個小型專題的素材前處理腳本
+是不成比例的投入，所以改用 `MANUAL_EXCLUDE`——人工看過裁圖後，把
+`(來源照片, class, confidence)` 記錄下來直接排除，誠實地承認這一步是
+人工判斷，而不是假裝有一個自動、可靠的偵測器。
+
+三個規則套用後，bus.jpg + zidane.jpg 的 8 個 instance 只剩 2 個都通過人工
+檢查的完整人物：`person_0`（0.860）、`person_1`（0.841）。原本信心最高的
+那個 person（0.878，手被裁掉）、巴士（0.838，MANUAL_EXCLUDE，也剛好同時
+被邊界過濾擋住）、zidane.jpg 的兩個人物與領帶、以及那個 0.412 的人，都
+不會進圖庫。目前圖庫裡沒有車輛類別，Stage 2/3 的 obstacle 因此也改用
+`person_1`——見下一節。
 
 ### 攻擊不能超出目標物件自己的邊界
 
@@ -256,8 +314,34 @@ Rule 1 的執行方式一樣：規則不是寫在文件裡希望大家遵守，�
   （例如以後改成車輛），patch 大小會自動跟著調整，不會有人忘記手動改設定
   而悄悄違反這條規則。
 
+#### 旋轉會讓正方形「看起來更寬」，size 上限也要跟著扣掉這個安全邊際
+
+只限制旋轉前的 `size` 還不夠。Stage 1 的 patch 是正方形，旋轉 θ 度之後，
+它的（軸對齊）外接框邊長會變成 `size × (|cos θ| + |sin θ|)`——在 θ=45°
+時最大，等於 `size × √2`（正方形有 90° 旋轉對稱，所以 45° 已經是最壞情況，
+角度再大也不會更壞）。換句話說，即使 `size ≤ target_min_dim`，一個旋轉
+45° 的 patch 實際佔據的範圍仍可能到 `target_min_dim × √2`，明顯超出
+target 自己的邊界——這是實測 review 時真的觀察到的：一塊旋轉 61° 的
+patch，即便邊長已經受 `patch_max_frac` 限制，視覺上仍明顯比 target 寬。
+
+修法是在算 size 上限之前，先把 `target_min_dim` 除掉這個最壞情況的安全
+係數：
+
+```python
+worst_theta = min(45°, max_rotation_deg)
+rotation_safety = cos(worst_theta) + sin(worst_theta)   # 45° 時 = √2
+size_bound_dim = target_min_dim / rotation_safety
+size 上限 = patch_max_frac × size_bound_dim
+```
+
+`max_rotation_deg = 90`（預設值）涵蓋 45°，所以 `rotation_safety = √2`；
+這樣不管 agent 選了哪個旋轉角度，貼上去的 patch 都保證留在 target 自己的
+邊界之內。Stage 2/3 的 attacker 不旋轉（`rotation_deg` 恆為 0），不需要
+這個修正。
+
 `tests/test_world.py` 裡對應的測試：
 `test_stage1_action_space_caps_size_at_the_targets_own_dimension`、
+`test_stage1_max_size_survives_worst_case_rotation`、
 `test_physics_attacker_patch_never_exceeds_the_targets_own_dimension`，
 以及三個 `test_*_rejects_a_patch_*_frac_above_one`（確認 > 1.0 一定會被拒絕）。
 

@@ -23,9 +23,9 @@ sys.stdout.reconfigure(line_buffering=True)  # keep progress visible when redire
 
 from agents.greedy_agent import GreedyAgent  # noqa: E402
 from agents.random_agent import RandomAgent  # noqa: E402
-from configs.loader import load_config, resolve  # noqa: E402
+from configs.loader import build_object_library, load_config, resolve  # noqa: E402
 from environments.image_env import ImageEnvConfig, ImageEnvironment  # noqa: E402
-from environments.physics2d_env import Physics2DEnvConfig, Physics2DEnvironment  # noqa: E402
+from environments.physics2d_env import ObstacleSpec, Physics2DEnvConfig, Physics2DEnvironment  # noqa: E402
 from environments.physics3d_env import Physics3DEnvConfig, Physics3DEnvironment  # noqa: E402
 from environments.sealed import EnvironmentAccessError, seal  # noqa: E402
 from evaluation.runner import run_episodes  # noqa: E402
@@ -61,8 +61,20 @@ def _tiny_cutout(tmp: Path) -> Path:
     return path
 
 
+def _tiny_obstacle_cutout(tmp: Path) -> Path:
+    path = tmp / "check_obstacle.png"
+    size = (40, 45)
+    sprite = Image.new("RGBA", size, (90, 95, 105, 0))
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).ellipse([3, 3, size[0] - 3, size[1] - 3], fill=255)
+    sprite.putalpha(mask)
+    sprite.save(path)
+    return path
+
+
 def build_environments(tmp: Path):
     cutout = _tiny_cutout(tmp)
+    obstacle_cutout = _tiny_obstacle_cutout(tmp)
     return {
         "ImageEnvironment": ImageEnvironment(
             ImageEnvConfig(
@@ -87,7 +99,9 @@ def build_environments(tmp: Path):
                 max_steps=6,
                 spawn_center=(35.0, 130.0),
                 spawn_jitter=4.0,
-                obstacles=[(60.0, 100.0, 100.0, 145.0)],
+                obstacles=[
+                    ObstacleSpec(sprite_path=str(obstacle_cutout), center=(80.0, 122.0), height=45.0)
+                ],
             ),
             victim=ColorBlobVictim(),
         ),
@@ -163,13 +177,19 @@ def main() -> int:
     print("\nassets and results on disk")
     if cfg:
         for label, path in [
-            ("source photo", resolve(cfg["assets"]["source_photo"])),
-            ("target sprite", resolve(cfg["assets"]["target_sprite"])),
+            ("source photos", resolve(cfg["assets"]["source_dir"])),
+            ("object library", resolve(cfg["assets"]["objects_index"])),
             ("results dir", resolve(cfg["output"]["results_dir"])),
             ("figures dir", resolve(cfg["output"]["figures_dir"])),
         ]:
             state = "present" if path.exists() else "missing"
             print(f"  {label:<14} {state:<8} {path}")
+
+        library = build_object_library(cfg)
+        if len(library) > 0:
+            print(f"  {len(library)} objects: " + ", ".join(sorted(library.ids())))
+        elif resolve(cfg["assets"]["objects_index"]).exists():
+            print("  object library file exists but is empty")
 
     print("\n" + "=" * 60)
     if _failures:
@@ -228,19 +248,19 @@ def _agents_run(env) -> str:
 
 
 def _yolo_smoke(cfg, tmp: Path) -> str:
-    from configs.loader import build_victim
-    from rendering.image_renderer import load_rgb
+    from configs.loader import build_stage1_env, build_victim
+
+    library = build_object_library(cfg)
+    if len(library) == 0:
+        return "no object library yet -- run scripts/prepare_assets.py"
 
     victim = build_victim(cfg)
-    photo = resolve(cfg["assets"]["source_photo"])
-    if not photo.exists():
-        return f"{victim.name} loaded (no source photo yet -- run scripts/prepare_assets.py)"
-    target_class = cfg["victim"].get("target_class")
-    detections = victim.detect(load_rgb(photo))
-    best = detections.best(target_class)
-    if best is None:
-        return f"{victim.name}: {len(detections)} detections, no '{target_class}' found"
-    return f"{victim.name}: {len(detections)} detections, best {target_class} = {best.confidence:.3f}"
+    env = build_stage1_env(cfg, victim)
+    telemetry = env.pop_telemetry()
+    return (
+        f"{victim.name}: Stage 1 clean scene -> "
+        f"{telemetry['baseline_class']} @ {telemetry['baseline_confidence']:.3f}"
+    )
 
 
 if __name__ == "__main__":

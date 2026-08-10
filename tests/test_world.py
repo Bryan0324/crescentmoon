@@ -134,6 +134,18 @@ def test_stage1_action_space_caps_size_at_the_targets_own_dimension(image_env):
     assert max_size <= target_min_dim + 1e-6
 
 
+def test_stage1_max_size_survives_worst_case_rotation(image_env):
+    """A rotated square's axis-aligned footprint grows by up to sqrt(2); the
+    legal max size must already account for that, not just the side length at
+    rotation=0, or a 45-degree patch could still spill past the target."""
+    import math
+
+    target_min_dim = 2.0 * min(image_env._world.target().half_extents)
+    max_size = float(image_env.action_space().high[2])
+    worst_case_footprint = max_size * math.sqrt(2)
+    assert worst_case_footprint <= target_min_dim + 1e-6
+
+
 def test_stage1_rejects_a_patch_max_frac_above_one(synthetic_cutout_sprite, victim):
     from environments.image_env import ImageEnvConfig, ImageEnvironment
 

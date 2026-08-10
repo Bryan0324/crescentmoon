@@ -25,13 +25,15 @@
                  └─────────────────────────┘
 ```
 
-照片、2D、3D 只是同一個 Interface 底下三種 Environment 實作：
+照片、2D、3D 只是同一個 Interface 底下三種 Environment 實作。三個 stage 的場景
+都是從同一個**物件圖庫**（`assets/objects/`，見下）組成的，差別在於場景由
+幾個物件組成、以及攻擊者怎麼移動：
 
-| Stage | Environment | Action | Agent | 重點 |
-| --- | --- | --- | --- | --- |
-| 1 | `ImageEnvironment` | `(x, y, size, rotation)` 放置 | Random / Greedy | 沒有物理，先驗證「受限 API 也能影響 YOLO」 |
-| 2 | `Physics2DEnvironment` | `(dx, dy)` 推力 | Random / Greedy / **PPO** | 加入速度上限、碰撞、邊界、障礙物 |
-| 3 | `Physics3DEnvironment` | `(dx, dy, dz)` 推力 | Random / Greedy / PPO | 只換 physics 與 renderer，Agent 與 reward 完全不動 |
+| Stage | Environment | 場景 | Action | Agent | 重點 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `ImageEnvironment` | 單一物件（圖庫挑一個當 target） | `(x, y, size, rotation)` 放置 | Random / Greedy | 沒有物理，先驗證「受限 API 也能影響 YOLO」 |
+| 2 | `Physics2DEnvironment` | 多物件組成（target + obstacle，皆為真實去背裁圖） | `(dx, dy)` 推力 | Random / Greedy / **PPO** | 加入速度上限、碰撞、邊界、障礙物 |
+| 3 | `Physics3DEnvironment` | 同 Stage 2，換成 3D 場景 | `(dx, dy, dz)` 推力 | Random / Greedy / PPO | 只換 physics 與 renderer，Agent 與 reward 完全不動 |
 
 ---
 
@@ -44,7 +46,8 @@ uv sync --extra dev
 # 2. 專案健康檢查：三個 Environment、存取規則、Agent 都能跑（不需 YOLO、幾秒鐘）
 uv run python scripts/check_project.py
 
-# 3. 準備素材：下載來源照片 + 用 YOLOv8-seg 對它做實例分割，去背切出 target sprite
+# 3. 準備素材：下載來源照片，用 YOLOv8-seg 對每張照片做實例分割，
+#    把每個夠完整、夠有信心的物件去背切出來，組成 assets/objects.json 圖庫
 uv run python scripts/prepare_assets.py
 
 # 4. 逐階段跑實驗
@@ -128,9 +131,16 @@ CrescentMoon/
 ├── reward/              attack_reward.py：三個 stage 共用同一份 reward
 ├── rendering/           image / 2D / 3D renderer
 ├── evaluation/          runner（實驗迴圈）、metrics、plots、experiment、report
-├── configs/default.yaml 所有超參數的單一來源
+├── configs/
+│   ├── default.yaml      所有超參數的單一來源
+│   ├── loader.py          從設定檔組出三個 stage 的 Environment
+│   └── objects.py         ObjectLibrary：讀 assets/objects.json 的小型索引
+├── assets/
+│   ├── source/            來源照片（只餵給分割模型，任何 Environment 都不會直接渲染它）
+│   ├── objects/            去背裁圖，每個真實物件一張 PNG
+│   └── objects.json        圖庫索引（id / class / confidence / 來源照片）
 ├── scripts/             check / assets / run_stage1-3 / run_all / make_report / build_notebooks
-├── tests/               介面契約、封閉性、物理、reward、agent 測試
+├── tests/               介面契約、封閉性、物理、reward、agent、圖庫測試
 ├── results/             實驗數據（json / csv / png / 訓練好的 policy）
 └── docs/                DESIGN.md（設計說明）、RESULTS.md（自動產生的實驗報告）
 ```
@@ -161,16 +171,41 @@ Agent 沒有任何方式取得它。
   自己的位置與貼圖，攻擊者的 action 只能移動自己那個物件，物理與 renderer
   都不會、也無法去改 target 或 obstacle 的像素——這是為了符合「現實攻擊以
   物件為單位，無法跨物件著色」而做的結構性保證，細節見 `docs/DESIGN.md` 第 5 節。
-- **target 是真正去背的物件**，不是 bounding-box 矩形裁圖：
-  `scripts/prepare_assets.py` 用 YOLOv8-seg 對來源照片做實例分割，把該物件的
-  segmentation mask 當作 alpha channel，存成 `assets/target_sprite.png`。
-  三個 stage 共用同一張 sprite，所以「target 這個物件」在 Stage 1/2/3 裡
-  形狀一致、邊界就是它自己的輪廓，攻擊者只能遮擋它，不能把像素畫進它的輪廓裡。
-- **攻擊者的尺寸不能超過目標物件自己的邊界**：patch 邊長永遠是
-  `patch_max_frac`（Stage 1）/ `patch_frac`（Stage 2）/ `patch_world_frac`
-  （Stage 3）乘上 target 自己較窄的那個維度，三個設定值都限制在 `(0, 1]`，
-  建構環境時就會驗證、超過直接 `ValueError`——一塊物理看板不可能比它要攻擊
-  的物件還大，細節見 `docs/DESIGN.md` 第 5 節「攻擊不能超出目標物件自己的邊界」。
+- **場景由一個共用的物件圖庫組成**，不是單一寫死的 sprite：
+  `scripts/prepare_assets.py` 用 YOLOv8-seg 對每張來源照片做實例分割，
+  把每個物件自己的 segmentation mask 當作 alpha channel 去背裁出來，
+  存進 `assets/objects/<class>_<n>.png`，並記錄進 `assets/objects.json`
+  （id、class、confidence、來源照片）。`configs/objects.py` 的
+  `ObjectLibrary` 負責用 id（`"person_0"`）或 class 名稱（`"person"`，
+  取信心最高的那個）查詢。
+  - **Stage 1** 只從圖庫挑一個物件當攻擊目標（`stage1.target_object`）——
+    場景就是「這一個物件 + 攻擊者」，符合「先驗證單一物件是否能被攻擊」。
+  - **Stage 2/3** 的場景是圖庫裡多個物件組成的：target 之外，
+    `obstacles` 清單裡的每一項也是圖庫裡的一個真實物件（目前是另一個人物
+    `person_1`，見下），以自己的 center + 顯示高度放進場景，而不是純色矩形。
+  - 每個物件在 Stage 1/2/3 裡都是同一張裁圖，形狀就是它自己的輪廓，
+    攻擊者只能遮擋它，不能把像素畫進它的輪廓裡。
+- **圖庫會過濾「不完整」的物件，其中一種過濾是人工的**：
+  - 被照片邊框切掉（四邊都會檢查——例如半身照下半身缺失，或站姿完整但
+    伸出去的手被照片邊緣切斷）用幾何邊界檢查擋掉；嚴重遮擋、只剩一小條
+    的 instance 通常信心也偏低，用信心門檻（0.6）擋掉——這兩種是自動判斷。
+  - 但「被畫面中站在它前面的東西挖了洞」（例如 bus.jpg 裡三個行人站在
+    巴士前面，巴士的分割遮罩因此缺了三塊人形）**沒有**用幾何方法自動偵測：
+    試過的一種寫法（遮罩內被自己輪廓完全包住的背景洞，去跟其他 instance
+    的真實遮罩比對）並不可靠，缺了三個人形洞的巴士算出來的分數，反而比
+    人工確認完整的人物還低。改成人工看過裁圖後手動排除（見
+    `scripts/prepare_assets.py::MANUAL_EXCLUDE`），誠實承認這一步是人工
+    判斷。目前的圖庫因此只剩兩個人物物件（`person_0`、`person_1`），沒有
+    車輛——巴士被上述兩種問題同時排除了，Stage 2/3 的 obstacle 也就改用
+    另一個人物代替。細節見 `docs/DESIGN.md` 第 5 節。
+- **攻擊者的尺寸不能超過目標物件自己的邊界，旋轉也算在內**：patch 邊長
+  永遠是 `patch_max_frac`（Stage 1）/ `patch_frac`（Stage 2）/
+  `patch_world_frac`（Stage 3）乘上 target 自己較窄的那個維度，三個設定值
+  都限制在 `(0, 1]`，建構環境時就會驗證、超過直接 `ValueError`。Stage 1
+  的 patch 還會旋轉，而旋轉正方形的外接框最多可以脹大 √2 倍（45° 時最大），
+  所以算 size 上限前會先把 target 的尺寸除以這個安全係數，確保**旋轉到任何
+  角度**都不會超出 target 的邊界，不是只在旋轉 0° 時成立。細節見
+  `docs/DESIGN.md` 第 5 節「攻擊不能超出目標物件自己的邊界」。
 - 3D 使用自寫的 pinhole camera + billboard renderer，不是 PyBullet/MuJoCo。
   這是刻意的取捨（prompt 第 24 節要求不要複雜 3D 引擎）：深度排序與遮擋是真的，
   但沒有剛體動力學、沒有旋轉、沒有陰影。

@@ -105,10 +105,14 @@ print(inspect.getsource(BaseEnvironment)[:2000])
         ),
         code(
             """
-sprite = resolve(cfg["assets"]["target_sprite"])
-print("target sprite:", sprite, "->", "OK" if sprite.exists() else "MISSING (run scripts/prepare_assets.py)")
-print("  a real, background-removed cutout -- every stage's World uses this exact sprite")
-print("  as its 'target' object; scripts/prepare_assets.py segments it out of a source photo")
+from configs.objects import load_library
+
+library = load_library(resolve(cfg["assets"]["objects_index"]), resolve(cfg["assets"]["objects_dir"]))
+print(f"object library: {len(library)} objects")
+for object_id in library.ids():
+    a = library.get(object_id)
+    print(f"  {a.id:<12} class={a.cls_name:<8} conf={a.confidence:.3f}  (from {a.source})")
+print("\\nStage 1 attacks a single one of these:", cfg["stage1"]["target_object"])
 """
         ),
         code(
@@ -130,14 +134,15 @@ for d in sorted(detections, key=lambda d: -d.confidence)[:5]:
 from PIL import Image
 from evaluation.plots import draw_detections
 
-with Image.open(sprite) as im:
+target_asset = library.resolve(cfg["stage1"]["target_object"])
+with Image.open(target_asset.path) as im:
     cutout = im.convert("RGBA")
 checker = Image.new("RGBA", cutout.size, (235, 235, 235, 255))
 checker.paste(cutout, (0, 0), cutout)
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
 axes[0].imshow(checker); axes[0].axis("off")
-axes[0].set_title("target_sprite.png -- a real cutout, own alpha, own object")
+axes[0].set_title(f"{target_asset.id} -- a real cutout, own alpha, own object")
 axes[1].imshow(draw_detections(clean, detections, highlight=cfg["victim"]["target_class"]))
 axes[1].axis("off"); axes[1].set_title("Stage 1's clean World, rendered")
 plt.show()

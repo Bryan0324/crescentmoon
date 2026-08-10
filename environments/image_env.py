@@ -20,6 +20,7 @@ and the only cross-object effect is occlusion by paint order (see
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,18 +132,27 @@ class ImageEnvironment(BaseEnvironment):
         # The patch's legal size is bounded by the target's own footprint, not
         # the canvas -- this is what makes "the attack cannot overtake the
         # object's boundary" a property of the action space itself, not a
-        # convention the agent could ignore.
+        # convention the agent could ignore. "size" is the *pre-rotation* side
+        # length, but a rotated square's axis-aligned footprint grows to
+        # size*(|cos th| + |sin th|), maximised at 45 deg (a square's rotational
+        # symmetry means nothing beyond 45 deg is ever worse). Divide by that
+        # worst-case factor up front so the bound holds at *every* legal
+        # rotation, not just rotation=0.
         target_min_dim = float(2.0 * min(self._world.target().half_extents))
+        worst_theta = math.radians(min(45.0, config.max_rotation_deg))
+        rotation_safety = math.cos(worst_theta) + math.sin(worst_theta)
+        size_bound_dim = target_min_dim / rotation_safety
+
         canvas_side = float(config.render_size)
         self._action_space = BoxSpace(
             low=np.array(
-                [0.0, 0.0, config.patch_min_frac * target_min_dim, -config.max_rotation_deg]
+                [0.0, 0.0, config.patch_min_frac * size_bound_dim, -config.max_rotation_deg]
             ),
             high=np.array(
                 [
                     canvas_side,
                     canvas_side,
-                    config.patch_max_frac * target_min_dim,
+                    config.patch_max_frac * size_bound_dim,
                     config.max_rotation_deg,
                 ]
             ),

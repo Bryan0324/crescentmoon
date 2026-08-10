@@ -5,9 +5,9 @@ Structurally identical to Stage 2.  The action grows from (dx, dy) to
 and the renderer projects billboards through a pinhole camera.  Agents, reward
 and the Environment API are untouched -- that is the whole point of Stage 3.
 
-Like Stage 2, the scene is a :class:`~environments.world.World`: target,
-obstacles and attacker are independent objects, and the agent's action only
-ever moves the ``attacker`` object.
+Like Stage 2, the scene is a :class:`~environments.world.World` composed of
+several real, background-removed objects (target, obstacle(s), attacker),
+and the agent's action only ever moves the ``attacker`` object.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from models.victim import VictimModel
 from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb
@@ -28,7 +27,18 @@ from .physics import AABB, Body, integrate
 from .spaces import BoxSpace, DictSpace, ImageSpace
 from .world import World, WorldObject
 
-__all__ = ["Physics3DEnvConfig", "Physics3DEnvironment"]
+__all__ = ["ObstacleSpec3D", "Physics3DEnvConfig", "Physics3DEnvironment"]
+
+
+@dataclass(frozen=True)
+class ObstacleSpec3D:
+    """One more real, background-removed object composed into the scene --
+    placed exactly like the target (its own world-space center + display
+    height), never a placeholder block."""
+
+    sprite_path: str
+    center: tuple[float, float, float]
+    height: float
 
 
 @dataclass
@@ -60,10 +70,7 @@ class Physics3DEnvConfig:
     spawn_center: tuple[float, float, float] = (-3.2, -1.4, 6.0)
     spawn_jitter: float = 0.7
 
-    #: obstacles as (center_xyz, half_extents_xyz)
-    obstacles: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = field(
-        default_factory=list
-    )
+    obstacles: list[ObstacleSpec3D] = field(default_factory=list)
     match_iou: float = 0.2
 
     #: See Physics2DEnvConfig.terminate_on_success -- fixed-length episodes make
@@ -92,15 +99,17 @@ def _build_world(config: Physics3DEnvConfig) -> World:
         )
     )
 
-    for i, (center, half) in enumerate(config.obstacles):
-        block = Image.new("RGBA", (256, 256), (70, 72, 78, 255))
+    for i, spec in enumerate(config.obstacles):
+        obstacle_sprite = load_sprite(spec.sprite_path)
+        obstacle_aspect = obstacle_sprite.width / obstacle_sprite.height
+        obstacle_half_h = spec.height / 2.0
         world.add(
             WorldObject(
                 id=f"obstacle_{i}",
                 kind="obstacle",
-                position=np.asarray(center, dtype=float),
-                half_extents=np.asarray(half, dtype=float),
-                sprite=block,
+                position=np.asarray(spec.center, dtype=float),
+                half_extents=np.array([obstacle_half_h * obstacle_aspect, obstacle_half_h, 0.15]),
+                sprite=obstacle_sprite,
             )
         )
 

@@ -6,8 +6,9 @@ environment decides where it actually ends up.
 
     action (dx, dy) -> constraint check -> physics -> render -> YOLO -> reward
 
-The scene is a :class:`~environments.world.World` of independent objects
-(target, obstacles, attacker).  The agent's action only ever moves the
+The scene is a :class:`~environments.world.World` composed of several real,
+background-removed objects (target, obstacle(s), attacker) -- not a target
+plus placeholder rectangles.  The agent's action only ever moves the
 ``attacker`` object's ``Body``; nothing in this module ever writes to the
 target's or an obstacle's position or sprite once the world is built --
 occlusion by paint order is the only cross-object effect the attacker has.
@@ -31,7 +32,18 @@ from .physics import AABB, Body, integrate
 from .spaces import BoxSpace, DictSpace, ImageSpace
 from .world import World, WorldObject
 
-__all__ = ["Physics2DEnvConfig", "Physics2DEnvironment"]
+__all__ = ["ObstacleSpec", "Physics2DEnvConfig", "Physics2DEnvironment"]
+
+
+@dataclass(frozen=True)
+class ObstacleSpec:
+    """One more real, background-removed object composed into the scene --
+    placed exactly like the target (its own center + display height), never a
+    placeholder rectangle."""
+
+    sprite_path: str
+    center: tuple[float, float]
+    height: float
 
 
 @dataclass
@@ -59,7 +71,7 @@ class Physics2DEnvConfig:
 
     spawn_center: tuple[float, float] = (90.0, 430.0)
     spawn_jitter: float = 45.0
-    obstacles: list[tuple[float, float, float, float]] = field(default_factory=list)
+    obstacles: list[ObstacleSpec] = field(default_factory=list)
     match_iou: float = 0.2
 
     #: End the episode the moment the attack succeeds?  Off by default: with a
@@ -104,16 +116,22 @@ def _build_world(config: Physics2DEnvConfig) -> World:
         )
     )
 
-    for i, (x1, y1, x2, y2) in enumerate(config.obstacles):
-        w, h = max(1, int(x2 - x1)), max(1, int(y2 - y1))
-        block = Image.new("RGBA", (w, h), (70, 72, 78, 255))
+    for i, spec in enumerate(config.obstacles):
+        obstacle_sprite = load_sprite(spec.sprite_path)
+        obstacle_scale = spec.height / obstacle_sprite.height
+        obstacle_sprite = obstacle_sprite.resize(
+            (max(1, int(obstacle_sprite.width * obstacle_scale)), max(1, int(spec.height))),
+            Image.BILINEAR,
+        )
         world.add(
             WorldObject(
                 id=f"obstacle_{i}",
                 kind="obstacle",
-                position=np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0]),
-                half_extents=np.array([w / 2.0, h / 2.0]),
-                sprite=block,
+                position=np.asarray(spec.center, dtype=float),
+                half_extents=np.array(
+                    [obstacle_sprite.width / 2.0, obstacle_sprite.height / 2.0]
+                ),
+                sprite=obstacle_sprite,
             )
         )
 
