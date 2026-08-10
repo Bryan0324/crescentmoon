@@ -43,7 +43,11 @@ class Physics2DEnvConfig:
     target_height: int = 250
     target_sprite_path: str | None = None
 
-    patch_size: int = 110
+    #: Patch side, as a fraction of the *target's own* narrower dimension --
+    #: a physical board cannot be bigger than the object it attacks. Must stay
+    #: <= 1.0 (enforced in __init__): at that bound the patch can never extend
+    #: past the target's own edges.
+    patch_frac: float = 0.8
     patch_seed: int = 0
     background_seed: int = 0
 
@@ -66,6 +70,11 @@ class Physics2DEnvConfig:
 
 
 def _build_world(config: Physics2DEnvConfig) -> World:
+    if not 0.0 < config.patch_frac <= 1.0:
+        raise ValueError(
+            "patch_frac must be in (0, 1]: a physical patch cannot be bigger than the "
+            f"object it attacks, got {config.patch_frac}"
+        )
     world = World()
 
     size = (config.render_size, config.render_size)
@@ -108,15 +117,17 @@ def _build_world(config: Physics2DEnvConfig) -> World:
             )
         )
 
+    target_min_dim = min(target_sprite.width, target_sprite.height)
+    patch_side = max(1, int(round(config.patch_frac * target_min_dim)))
     patch = make_patch_texture(size=256, seed=config.patch_seed).resize(
-        (config.patch_size, config.patch_size), Image.BILINEAR
+        (patch_side, patch_side), Image.BILINEAR
     )
     world.add(
         WorldObject(
             id="attacker",
             kind="attacker",
             position=np.zeros(2),
-            half_extents=np.array([config.patch_size / 2.0, config.patch_size / 2.0]),
+            half_extents=np.array([patch_side / 2.0, patch_side / 2.0]),
             sprite=patch,
             movable=True,
         )

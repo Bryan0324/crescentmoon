@@ -84,7 +84,6 @@ def build_environments(tmp: Path):
                 target_class="target",
                 target_center=(80.0, 88.0),
                 target_height=80,
-                patch_size=52,
                 max_steps=6,
                 spawn_center=(35.0, 130.0),
                 spawn_jitter=4.0,

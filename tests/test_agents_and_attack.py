@@ -49,13 +49,17 @@ def test_occluding_the_target_lowers_the_victims_confidence(image_env):
 
 
 def test_search_finds_a_better_attack_than_its_first_guess(image_env):
-    records, _ = run_episodes(image_env, RandomAgent(seed=1), n_episodes=25, seed=0)
+    # The action space now bounds patch size to the target's own footprint
+    # (it must not overtake the target's boundary), so a uniformly random
+    # (x, y) lands on the target less often than before -- give it a larger
+    # query budget to reliably land at least one overlapping placement.
+    records, _ = run_episodes(image_env, RandomAgent(seed=1), n_episodes=200, seed=0)
     confidences = [r.best_confidence for r in records]
     assert min(confidences) < confidences[0] or min(confidences) < records[0].baseline_confidence
 
     summary = summarize(records)
     assert 0.0 <= summary["attack_success_rate"] <= 1.0
-    assert summary["n_episodes"] == 25
+    assert summary["n_episodes"] == 200
 
 
 def test_obstacles_restrict_where_the_attacker_can_go(

@@ -166,6 +166,11 @@ Agent 沒有任何方式取得它。
   segmentation mask 當作 alpha channel，存成 `assets/target_sprite.png`。
   三個 stage 共用同一張 sprite，所以「target 這個物件」在 Stage 1/2/3 裡
   形狀一致、邊界就是它自己的輪廓，攻擊者只能遮擋它，不能把像素畫進它的輪廓裡。
+- **攻擊者的尺寸不能超過目標物件自己的邊界**：patch 邊長永遠是
+  `patch_max_frac`（Stage 1）/ `patch_frac`（Stage 2）/ `patch_world_frac`
+  （Stage 3）乘上 target 自己較窄的那個維度，三個設定值都限制在 `(0, 1]`，
+  建構環境時就會驗證、超過直接 `ValueError`——一塊物理看板不可能比它要攻擊
+  的物件還大，細節見 `docs/DESIGN.md` 第 5 節「攻擊不能超出目標物件自己的邊界」。
 - 3D 使用自寫的 pinhole camera + billboard renderer，不是 PyBullet/MuJoCo。
   這是刻意的取捨（prompt 第 24 節要求不要複雜 3D 引擎）：深度排序與遮擋是真的，
   但沒有剛體動力學、沒有旋轉、沒有陰影。

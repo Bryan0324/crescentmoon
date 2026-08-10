@@ -219,6 +219,48 @@ alpha channel，存成 `assets/target_sprite.png`。結果是一張真正只有�
 一張橢圓形的合成 alpha cutout（`synthesize_sprite()`），而不是純色矩形，
 讓離線路徑練到的仍然是「非矩形 alpha 合成」這條程式碼路徑。
 
+### 攻擊不能超出目標物件自己的邊界
+
+第二個在 review 中被指出的問題：即使 target 已經是真的去背裁圖，
+attacker 這個物件本身仍然可以比 target 大很多。舊版 Stage 1 允許 patch 邊長
+到 canvas 邊長的 45%（在 512px 畫布上約 230px），但 target 裁圖本身只有
+~72px 寬——攻擊者可以貼一塊比目標寬三倍的板子，這已經不是「遮擋物件」，
+更接近「用一塊無關的大看板蓋住整個場景」，不符合「現實中的攻擊應當以物件
+為單位」。Stage 2 也一樣：`patch_size` 曾經是固定 82px，比 target 自己
+的寬度（~55px）還寬。
+
+修法是讓 patch 的合法尺寸**永遠以 target 自己的尺寸為準，不是畫布**：
+
+```text
+target_min_dim = min(target 的寬, target 的高)
+patch 邊長上限 = patch_max_frac × target_min_dim   (patch_max_frac ≤ 1.0)
+```
+
+在 `patch_max_frac = 1.0` 時，patch 邊長恰好等於 target 較窄的那個維度，
+不可能再寬過 target 本身；`ImageEnvConfig`/`Physics2DEnvConfig`/
+`Physics3DEnvConfig` 建構時都會檢查 `patch_max_frac`／`patch_frac`／
+`patch_world_frac` 落在 `(0, 1]`，超過就直接 `raise ValueError`——這和
+Rule 1 的執行方式一樣：規則不是寫在文件裡希望大家遵守，而是程式碼結構上
+不給違反的機會。
+
+三個 stage 的差異只在**誰、何時**套用這條規則：
+
+- **Stage 1** — size 是 agent action 的一部分，所以規則做在
+  `action_space()` 的上界：`high[2] = patch_max_frac * target_min_dim`。
+  Agent 無論怎麼選，`clip()` 之後的 size 永遠不可能超過 target 自己的寬度。
+- **Stage 2/3** — patch 尺寸是環境設定值，不是 agent 能控制的（agent 只能
+  推動它，不能改變它的大小），所以規則做在 `_build_world()` 建構時：
+  `patch_frac`／`patch_world_frac` 現在取代了原本寫死的
+  `patch_size`／`patch_world_size`，實際像素 / 世界單位大小是從
+  target 的 `half_extents` 動態算出來的——換一張長寬比不同的 target sprite
+  （例如以後改成車輛），patch 大小會自動跟著調整，不會有人忘記手動改設定
+  而悄悄違反這條規則。
+
+`tests/test_world.py` 裡對應的測試：
+`test_stage1_action_space_caps_size_at_the_targets_own_dimension`、
+`test_physics_attacker_patch_never_exceeds_the_targets_own_dimension`，
+以及三個 `test_*_rejects_a_patch_*_frac_above_one`（確認 > 1.0 一定會被拒絕）。
+
 ## 6. Renderer
 
 - `rendering/image_renderer.py` — patch 貼圖生成（固定 seed 的高對比色塊 + 噪點）

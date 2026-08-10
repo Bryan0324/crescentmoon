@@ -40,7 +40,11 @@ class Physics3DEnvConfig:
     target_world_height: float = 3.4
     target_sprite_path: str | None = None
 
-    patch_world_size: float = 1.9
+    #: Patch side (world units), as a fraction of the *target's own* narrower
+    #: dimension -- a physical board cannot be bigger than the object it
+    #: attacks. Must stay <= 1.0 (enforced in __init__): at that bound the
+    #: patch can never extend past the target's own edges.
+    patch_world_frac: float = 0.8
     patch_seed: int = 0
     background_seed: int = 0
     fov_deg: float = 55.0
@@ -68,6 +72,11 @@ class Physics3DEnvConfig:
 
 
 def _build_world(config: Physics3DEnvConfig) -> World:
+    if not 0.0 < config.patch_world_frac <= 1.0:
+        raise ValueError(
+            "patch_world_frac must be in (0, 1]: a physical patch cannot be bigger than the "
+            f"object it attacks, got {config.patch_world_frac}"
+        )
     world = World()
 
     target_sprite = load_sprite(config.target_sprite_path)
@@ -95,8 +104,10 @@ def _build_world(config: Physics3DEnvConfig) -> World:
             )
         )
 
+    target_min_dim = 2.0 * min(half_h * aspect, half_h)
+    patch_world_size = config.patch_world_frac * target_min_dim
     patch = make_patch_texture(size=256, seed=config.patch_seed)
-    s = config.patch_world_size / 2.0
+    s = patch_world_size / 2.0
     world.add(
         WorldObject(
             id="attacker",

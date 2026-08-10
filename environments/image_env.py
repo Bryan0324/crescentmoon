@@ -50,8 +50,12 @@ class ImageEnvConfig:
     background_seed: int = 0
 
     patch_seed: int = 0
-    patch_min_frac: float = 0.10    # patch side, as a fraction of render_size
-    patch_max_frac: float = 0.32
+    #: Patch side, as a fraction of the *target's own* narrower dimension --
+    #: not of the canvas. A physical patch cannot be bigger than the object it
+    #: attacks, so ``patch_max_frac`` must stay <= 1.0 (enforced in __init__):
+    #: at that bound the patch can never extend past the target's own edges.
+    patch_min_frac: float = 0.35
+    patch_max_frac: float = 0.9
     max_rotation_deg: float = 90.0
     max_steps: int = 1              # one placement per episode by default
     match_iou: float = 0.2
@@ -109,6 +113,11 @@ class ImageEnvironment(BaseEnvironment):
         victim: VictimModel,
         reward_config: RewardConfig | None = None,
     ) -> None:
+        if not 0.0 < config.patch_max_frac <= 1.0:
+            raise ValueError(
+                "patch_max_frac must be in (0, 1]: a physical patch cannot be bigger than the "
+                f"object it attacks, got {config.patch_max_frac}"
+            )
         self._config = config
         self._victim = victim
         self._reward_fn = AttackReward(reward_config)
@@ -119,10 +128,24 @@ class ImageEnvironment(BaseEnvironment):
         self._world = _build_world(config)
         self._patch_texture = make_patch_texture(size=256, seed=config.patch_seed)
 
-        side = float(config.render_size)
+        # The patch's legal size is bounded by the target's own footprint, not
+        # the canvas -- this is what makes "the attack cannot overtake the
+        # object's boundary" a property of the action space itself, not a
+        # convention the agent could ignore.
+        target_min_dim = float(2.0 * min(self._world.target().half_extents))
+        canvas_side = float(config.render_size)
         self._action_space = BoxSpace(
-            low=np.array([0.0, 0.0, config.patch_min_frac * side, -config.max_rotation_deg]),
-            high=np.array([side, side, config.patch_max_frac * side, config.max_rotation_deg]),
+            low=np.array(
+                [0.0, 0.0, config.patch_min_frac * target_min_dim, -config.max_rotation_deg]
+            ),
+            high=np.array(
+                [
+                    canvas_side,
+                    canvas_side,
+                    config.patch_max_frac * target_min_dim,
+                    config.max_rotation_deg,
+                ]
+            ),
             names=("x", "y", "size", "rotation"),
         )
         self._observation_space = DictSpace(

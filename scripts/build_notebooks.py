@@ -278,7 +278,11 @@ obs = api.reset(seed=0)
 baseline = env.pop_telemetry()               # experimenter-side telemetry
 print("clean detection:", baseline["baseline_class"], f"{baseline['baseline_confidence']:.3f}")
 
-obs, reward, terminated, truncated, info = api.step(np.array([260., 300., 140., 20.]))
+# size is capped at the target's own width -- the patch can never be bigger
+# than the object it attacks (docs/DESIGN.md section 5)
+tx, ty = cfg["stage1"]["target_center"]
+max_size = api.action_space().high[2]
+obs, reward, terminated, truncated, info = api.step(np.array([tx, ty, max_size, 20.]))
 print("reward:", round(reward, 4), "| info:", info)
 """
         ),

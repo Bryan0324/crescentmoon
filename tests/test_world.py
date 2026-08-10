@@ -115,8 +115,68 @@ def test_stage1_target_is_a_real_non_rectangular_cutout(image_env):
 
 def test_stage1_attacker_object_reflects_the_last_action(image_env):
     image_env.reset(seed=0)
-    image_env.step(np.array([120.0, 140.0, 80.0, 15.0]))
+    size = float(image_env.action_space().high[2])  # the legal maximum
+    image_env.step(np.array([120.0, 140.0, size, 15.0]))
     attacker = image_env._world.attacker()
     assert np.allclose(attacker.position, [120.0, 140.0])
     assert attacker.rotation_deg == 15.0
-    assert attacker.sprite.size == (80, 80)
+    assert attacker.sprite.size == (round(size), round(size))
+
+
+# ---------------------------------------------------------------- boundary
+# "the attack shouldn't overtake the object's boundary": a physical patch
+# cannot be bigger than the object it attacks, in any of the three stages.
+
+
+def test_stage1_action_space_caps_size_at_the_targets_own_dimension(image_env):
+    target_min_dim = 2.0 * min(image_env._world.target().half_extents)
+    max_size = image_env.action_space().high[2]
+    assert max_size <= target_min_dim + 1e-6
+
+
+def test_stage1_rejects_a_patch_max_frac_above_one(synthetic_cutout_sprite, victim):
+    from environments.image_env import ImageEnvConfig, ImageEnvironment
+
+    with pytest.raises(ValueError):
+        ImageEnvironment(
+            ImageEnvConfig(
+                target_sprite_path=synthetic_cutout_sprite,
+                render_size=192,
+                obs_size=32,
+                target_class="target",
+                patch_max_frac=1.5,  # bigger than the target -- must be rejected
+            ),
+            victim=victim,
+        )
+
+
+@pytest.mark.parametrize("env_name", ["physics2d_env", "physics3d_env"])
+def test_physics_attacker_patch_never_exceeds_the_targets_own_dimension(env_name, request):
+    env = request.getfixturevalue(env_name)
+    env.reset(seed=0)
+    world = env._world
+    target_min_dim = 2.0 * min(world.target().half_extents[:2])
+    attacker_size = 2.0 * min(world.attacker().half_extents[:2])
+    assert attacker_size <= target_min_dim + 1e-6
+
+
+def test_physics2d_rejects_a_patch_frac_above_one(victim):
+    from environments.physics2d_env import Physics2DEnvConfig, Physics2DEnvironment
+
+    with pytest.raises(ValueError):
+        Physics2DEnvironment(
+            Physics2DEnvConfig(render_size=192, obs_size=32, target_class="target", patch_frac=1.2),
+            victim=victim,
+        )
+
+
+def test_physics3d_rejects_a_patch_world_frac_above_one(victim):
+    from environments.physics3d_env import Physics3DEnvConfig, Physics3DEnvironment
+
+    with pytest.raises(ValueError):
+        Physics3DEnvironment(
+            Physics3DEnvConfig(
+                render_size=192, obs_size=32, target_class="target", patch_world_frac=1.2
+            ),
+            victim=victim,
+        )

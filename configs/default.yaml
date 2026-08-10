@@ -35,8 +35,12 @@ stage1:
   target_center: [256.0, 290.0]
   target_height: 250
   background_seed: 0
-  patch_min_frac: 0.12     # patch side as a fraction of the image side
-  patch_max_frac: 0.45     # a big physical board is allowed -- but costs more
+  # Patch side, as a fraction of the target's own narrower dimension -- never
+  # the canvas. The attack cannot overtake the object's boundary: at
+  # patch_max_frac = 1.0 the patch is exactly as wide as the target and no
+  # wider, so it can never spill past the target's own edges.
+  patch_min_frac: 0.35
+  patch_max_frac: 0.9
   max_rotation_deg: 90.0
   max_steps: 1
   search_episodes: 300     # query budget per baseline method
@@ -52,7 +56,7 @@ stage2:
   damping: 0.85
   target_center: [192.0, 215.0]
   target_height: 190
-  patch_size: 82
+  patch_frac: 0.8          # patch side, as a fraction of the target's own narrower dimension
   spawn_center: [70.0, 320.0]
   spawn_jitter: 35.0
   obstacles:               # used by the "obstacle" variant only
@@ -79,7 +83,7 @@ stage3:
   damping: 0.85
   target_center: [0.0, 0.0, 11.0]
   target_world_height: 3.4
-  patch_world_size: 1.9
+  patch_world_frac: 0.8    # patch side, as a fraction of the target's own narrower dimension
   world_lo: [-5.0, -3.2, 3.0]
   world_hi: [5.0, 3.2, 13.5]
   spawn_center: [-3.2, -1.4, 6.0]
