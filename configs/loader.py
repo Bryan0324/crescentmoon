@@ -100,6 +100,11 @@ def _sprite_path(library: ObjectLibrary, ref: str) -> str | None:
     return str(library.resolve(ref).path)
 
 
+def _texture_cells(cfg: dict[str, Any]) -> int:
+    """Shared across all three stages -- the attacker's pattern grid size."""
+    return int(cfg.get("attack", {}).get("texture_cells", 3))
+
+
 # ----------------------------------------------------------------------
 def build_stage1_env(cfg: dict[str, Any], victim: VictimModel) -> ImageEnvironment:
     s = cfg["stage1"]
@@ -113,6 +118,7 @@ def build_stage1_env(cfg: dict[str, Any], victim: VictimModel) -> ImageEnvironme
             target_center=tuple(s["target_center"]),
             target_height=int(s["target_height"]),
             background_seed=int(s["background_seed"]),
+            texture_cells=_texture_cells(cfg),
             patch_min_frac=float(s["patch_min_frac"]),
             patch_max_frac=float(s["patch_max_frac"]),
             max_rotation_deg=float(s["max_rotation_deg"]),
@@ -149,6 +155,7 @@ def build_stage2_env(
             target_height=int(s["target_height"]),
             target_sprite_path=_sprite_path(library, s["target_object"]),
             patch_frac=float(s["patch_frac"]),
+            texture_cells=_texture_cells(cfg),
             max_steps=int(s["max_steps"]),
             accel=float(s["accel"]),
             max_speed=float(s["max_speed"]),
@@ -190,6 +197,7 @@ def build_stage3_env(
             target_world_height=float(s["target_world_height"]),
             target_sprite_path=_sprite_path(library, s["target_object"]),
             patch_world_frac=float(s["patch_world_frac"]),
+            texture_cells=_texture_cells(cfg),
             fov_deg=float(s["fov_deg"]),
             max_steps=int(s["max_steps"]),
             accel=float(s["accel"]),

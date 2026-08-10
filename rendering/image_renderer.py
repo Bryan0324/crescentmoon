@@ -19,6 +19,8 @@ __all__ = [
     "make_patch_texture",
     "load_sprite",
     "silhouette_min_span",
+    "render_patch_from_params",
+    "texture_param_count",
 ]
 
 
@@ -59,6 +61,32 @@ def make_patch_texture(size: int = 128, seed: int = 0, cells: int = 8) -> Image.
     noise = rng.integers(-30, 31, size=tex.shape)
     tex = np.clip(tex.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
+    rgba = np.dstack([tex, np.full((size, size, 1), 255, dtype=np.uint8)])
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def texture_param_count(cells: int) -> int:
+    """Length of the flat texture action vector for a ``cells x cells`` grid."""
+    return cells * cells * 3
+
+
+def render_patch_from_params(params: np.ndarray, cells: int, size: int) -> Image.Image:
+    """Build an opaque RGBA patch from a flat, agent-chosen colour grid.
+
+    ``params`` is ``texture_param_count(cells)`` values in [0, 1] -- one RGB
+    triple per coarse cell -- upscaled with nearest-neighbour so cell
+    boundaries stay sharp (a printed board, not a blur). This is what lets an
+    agent search over the patch's *pattern*, not just its placement, while
+    staying entirely within the Environment API: the agent picks numbers, the
+    environment renders them and reports back a reward. It never sees the
+    victim's gradient or features (Rule 1) -- this is black-box search over a
+    small parameter grid, not gradient-based adversarial optimisation.
+    """
+    grid = np.clip(np.asarray(params, dtype=np.float64), 0.0, 1.0).reshape(cells, cells, 3)
+    blocks = (grid * 255.0).astype(np.uint8)
+    tex = np.asarray(
+        Image.fromarray(blocks, mode="RGB").resize((size, size), Image.NEAREST), dtype=np.uint8
+    )
     rgba = np.dstack([tex, np.full((size, size, 1), 255, dtype=np.uint8)])
     return Image.fromarray(rgba, mode="RGBA")
 

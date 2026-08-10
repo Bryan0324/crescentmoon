@@ -214,8 +214,16 @@ Agent 沒有任何方式取得它。
 - 3D 使用自寫的 pinhole camera + billboard renderer，不是 PyBullet/MuJoCo。
   這是刻意的取捨（prompt 第 24 節要求不要複雜 3D 引擎）：深度排序與遮擋是真的，
   但沒有剛體動力學、沒有旋轉、沒有陰影。
-- 攻擊方式是「用一塊實體看板遮擋 / 干擾」，patch 的**貼圖是固定的**，
-  Agent 優化的是放置與移動，不是像素。這正是「物理可行」的定義所要求的。
+- 攻擊方式是「用一塊實體看板遮擋 / 干擾」，patch 的**圖案也是 Agent 搜尋的
+  一部分**，不再是固定貼圖：三個 stage 的 action 都多了一個
+  `texture_cells × texture_cells × 3` 維的粗色塊網格（預設 3×3=27 維，
+  `configs/default.yaml` 的 `attack.texture_cells`），Environment 把這組
+  數字 nearest-neighbour 放大成 patch 貼圖。這是加入這個機制之後才發現的：
+  把 patch 尺寸正確限制在物件邊界內以後，固定圖案的攻擊幾乎沒有效果——
+  真正的 adversarial patch 有效主要是靠圖案，不是遮擋面積。仍然是黑箱、
+  無梯度的搜尋（Rule 1），只是搜尋空間變大了；沒有做逐像素控制，
+  那個空間大到 Random/Greedy/PPO 在這個預算下都探索不完。
+  細節見 `docs/DESIGN.md` 第 6 節。
 - PPO 的預算刻意調小（CPU 可跑完）。要更漂亮的曲線就把
   `configs/default.yaml` 裡的 `total_timesteps` 調大。
 - 三個 stage 的背景都是程序生成的低紋理背景（`make_background()`），

@@ -23,7 +23,13 @@ import numpy as np
 from PIL import Image
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
+from rendering.image_renderer import (
+    load_sprite,
+    render_patch_from_params,
+    resize_rgb,
+    silhouette_min_span,
+    texture_param_count,
+)
 from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -60,7 +66,11 @@ class Physics2DEnvConfig:
     #: <= 1.0 (enforced in __init__): at that bound the patch can never extend
     #: past the target's own edges.
     patch_frac: float = 0.8
-    patch_seed: int = 0
+    #: The attacker's pattern is a `texture_cells x texture_cells` colour grid
+    #: chosen every step (nearest-neighbour upscaled to the fixed patch size),
+    #: not a fixed texture -- the agent searches the pattern, not just where
+    #: to push it.
+    texture_cells: int = 3
     background_seed: int = 0
 
     max_steps: int = 40
@@ -140,9 +150,7 @@ def _build_world(config: Physics2DEnvConfig) -> World:
     # is not a safe bound for a non-rectangular object.
     target_min_dim = silhouette_min_span(target_sprite)
     patch_side = max(1, int(round(config.patch_frac * target_min_dim)))
-    patch = make_patch_texture(size=256, seed=config.patch_seed).resize(
-        (patch_side, patch_side), Image.BILINEAR
-    )
+    patch = Image.new("RGBA", (patch_side, patch_side), (128, 128, 128, 255))  # replaced every step
     world.add(
         WorldObject(
             id="attacker",
@@ -166,11 +174,13 @@ class Physics2DEnvironment(BaseEnvironment):
         self._config = config
         self._victim = victim
         self._reward_fn = AttackReward(reward_config)
+        self._n_texture = texture_param_count(config.texture_cells)
 
         self._renderer = Renderer2D(
             Renderer2DConfig(width=config.render_size, height=config.render_size)
         )
         self._world = _build_world(config)
+        self._patch_side = int(round(2.0 * self._world.attacker().half_extents[0]))
         self._obstacle_boxes = [
             AABB.from_center(obj.position, obj.half_extents) for obj in self._world.obstacles()
         ]
@@ -178,16 +188,23 @@ class Physics2DEnvironment(BaseEnvironment):
             np.zeros(2), np.array([config.render_size, config.render_size], dtype=float)
         )
 
+        # Movement (dx, dy) + a small colour-grid texture: the agent searches
+        # the patch's *pattern* through the same action it uses to push it,
+        # not just where to put a fixed board.
         self._action_space = BoxSpace(
-            low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), names=("dx", "dy")
+            low=np.concatenate([[-1.0, -1.0], np.zeros(self._n_texture)]),
+            high=np.concatenate([[1.0, 1.0], np.ones(self._n_texture)]),
+            names=("dx", "dy") + tuple(f"tex_{i}" for i in range(self._n_texture)),
         )
+        action_dim = self._action_space.n
         self._observation_space = DictSpace(
             {
                 "image": ImageSpace(config.obs_size, config.obs_size),
                 "vector": BoxSpace(
-                    low=np.array([0.0, 0.0, -1.0, -1.0]),
-                    high=np.array([1.0, 1.0, 1.0, 1.0]),
-                    names=("step_progress", "last_action_success", "last_dx", "last_dy"),
+                    low=np.concatenate([[0.0, 0.0], np.full(action_dim, -1.0)]),
+                    high=np.concatenate([[1.0, 1.0], np.ones(action_dim)]),
+                    names=("step_progress", "last_action_success")
+                    + tuple(f"last_{n}" for n in self._action_space.names),
                 ),
             }
         )
@@ -197,7 +214,7 @@ class Physics2DEnvironment(BaseEnvironment):
         self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_success = 1.0
-        self._last_action = np.zeros(2)
+        self._last_action = np.zeros(action_dim)
         self._baseline_conf = 0.0
         self._baseline_bbox = (0.0, 0.0, 0.0, 0.0)
         self._baseline_class = config.target_class or ""
@@ -229,7 +246,7 @@ class Physics2DEnvironment(BaseEnvironment):
         attacker.position = self._body.position
         self._steps = 0
         self._last_success = 1.0
-        self._last_action = np.zeros(2)
+        self._last_action = np.zeros(self._action_space.n)
 
         # Baseline: what the victim sees before the attacker is in frame.
         clean = self._renderer.render(self._world.excluding("attacker"))
@@ -257,14 +274,12 @@ class Physics2DEnvironment(BaseEnvironment):
         return self.observe()
 
     def observe(self) -> Observation:
-        vector = np.array(
+        vector = np.concatenate(
             [
-                self._steps / max(1, self._config.max_steps),
-                self._last_success,
-                *self._last_action,
-            ],
-            dtype=np.float32,
-        )
+                [self._steps / max(1, self._config.max_steps), self._last_success],
+                self._last_action,
+            ]
+        ).astype(np.float32)
         return {
             "image": resize_rgb(self._frame, self._config.obs_size),
             "vector": vector,
@@ -281,11 +296,12 @@ class Physics2DEnvironment(BaseEnvironment):
 
         applied = self._action_space.clip(requested).astype(np.float64)
         out_of_range = not self._action_space.contains(requested)
+        movement, texture_params = applied[:2], applied[2:]
 
         # --- physics: the environment, not the agent, moves the object ----
         outcome = integrate(
             self._body,
-            acceleration=applied * cfg.accel,
+            acceleration=movement * cfg.accel,
             obstacles=self._obstacle_boxes,
             bounds=self._bounds,
             dt=1.0,
@@ -296,8 +312,12 @@ class Physics2DEnvironment(BaseEnvironment):
         invalid = bool(out_of_range or outcome.collided)
         blocked = bool(invalid or outcome.hit_boundary)
 
-        # The attacker's own object is the only thing this step touches.
-        self._world.attacker().position = self._body.position
+        # The attacker's own object is the only thing this step touches: its
+        # position (from physics) and its pattern (chosen directly, like
+        # Stage 1 -- the board's own texture isn't something physics moves).
+        attacker = self._world.attacker()
+        attacker.position = self._body.position
+        attacker.sprite = render_patch_from_params(texture_params, cfg.texture_cells, self._patch_side)
 
         # --- render -> victim -> reward -----------------------------------
         self._frame = self._renderer.render(self._world)

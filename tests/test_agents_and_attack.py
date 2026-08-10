@@ -41,8 +41,9 @@ def test_occluding_the_target_lowers_the_victims_confidence(image_env):
 
     size = image_env.action_space().high[2]
     centre = image_env.action_space().high[0] / 2
+    n_texture = image_env.action_space().n - 4
     image_env.reset(seed=0)
-    image_env.step(np.array([centre, centre, size, 0.0]))
+    image_env.step(np.concatenate([[centre, centre, size, 0.0], np.zeros(n_texture)]))
     attacked = image_env.pop_telemetry()["steps"][-1]["current_confidence"]
 
     assert attacked < baseline
@@ -70,8 +71,9 @@ def test_obstacles_restrict_where_the_attacker_can_go(
         env.reset(seed=0)
         start = None
         end = None
+        push = np.concatenate([[0.6, -0.8], np.zeros(env.action_space().n - 2)])
         for _ in range(8):
-            _, _, terminated, truncated, _ = env.step(np.array([0.6, -0.8]))
+            _, _, terminated, truncated, _ = env.step(push)
             if terminated or truncated:
                 break
         steps = env.pop_telemetry()["steps"]

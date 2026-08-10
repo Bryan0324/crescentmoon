@@ -17,8 +17,16 @@ from typing import Any
 
 import numpy as np
 
+from PIL import Image
+
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
+from rendering.image_renderer import (
+    load_sprite,
+    render_patch_from_params,
+    resize_rgb,
+    silhouette_min_span,
+    texture_param_count,
+)
 from rendering.renderer_3d import Renderer3D, Renderer3DConfig
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -28,6 +36,11 @@ from .spaces import BoxSpace, DictSpace, ImageSpace
 from .world import World, WorldObject
 
 __all__ = ["ObstacleSpec3D", "Physics3DEnvConfig", "Physics3DEnvironment"]
+
+#: Base pixel resolution for the attacker's texture. Renderer3D resizes this
+#: to whatever the projected on-screen size is every frame (depth changes it
+#: continuously); this is just the source material's resolution.
+_TEXTURE_BASE_SIZE = 256
 
 
 @dataclass(frozen=True)
@@ -55,7 +68,9 @@ class Physics3DEnvConfig:
     #: attacks. Must stay <= 1.0 (enforced in __init__): at that bound the
     #: patch can never extend past the target's own edges.
     patch_world_frac: float = 0.8
-    patch_seed: int = 0
+    #: The attacker's pattern is a `texture_cells x texture_cells` colour grid
+    #: chosen every step, not a fixed texture -- see Physics2DEnvConfig.
+    texture_cells: int = 3
     background_seed: int = 0
     fov_deg: float = 55.0
 
@@ -120,7 +135,7 @@ def _build_world(config: Physics3DEnvConfig) -> World:
     world_per_px = config.target_world_height / target_sprite.height
     target_min_dim = silhouette_min_span(target_sprite) * world_per_px
     patch_world_size = config.patch_world_frac * target_min_dim
-    patch = make_patch_texture(size=256, seed=config.patch_seed)
+    patch = Image.new("RGBA", (_TEXTURE_BASE_SIZE, _TEXTURE_BASE_SIZE), (128, 128, 128, 255))
     s = patch_world_size / 2.0
     world.add(
         WorldObject(
@@ -145,6 +160,7 @@ class Physics3DEnvironment(BaseEnvironment):
         self._config = config
         self._victim = victim
         self._reward_fn = AttackReward(reward_config)
+        self._n_texture = texture_param_count(config.texture_cells)
 
         self._renderer = Renderer3D(
             Renderer3DConfig(
@@ -162,24 +178,22 @@ class Physics3DEnvironment(BaseEnvironment):
             np.asarray(config.world_lo, dtype=float), np.asarray(config.world_hi, dtype=float)
         )
 
+        # Movement (dx, dy, dz) + a small colour-grid texture: same idea as
+        # Stage 2, one axis further.
         self._action_space = BoxSpace(
-            low=np.array([-1.0, -1.0, -1.0]),
-            high=np.array([1.0, 1.0, 1.0]),
-            names=("dx", "dy", "dz"),
+            low=np.concatenate([[-1.0, -1.0, -1.0], np.zeros(self._n_texture)]),
+            high=np.concatenate([[1.0, 1.0, 1.0], np.ones(self._n_texture)]),
+            names=("dx", "dy", "dz") + tuple(f"tex_{i}" for i in range(self._n_texture)),
         )
+        action_dim = self._action_space.n
         self._observation_space = DictSpace(
             {
                 "image": ImageSpace(config.obs_size, config.obs_size),
                 "vector": BoxSpace(
-                    low=np.array([0.0, 0.0, -1.0, -1.0, -1.0]),
-                    high=np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
-                    names=(
-                        "step_progress",
-                        "last_action_success",
-                        "last_dx",
-                        "last_dy",
-                        "last_dz",
-                    ),
+                    low=np.concatenate([[0.0, 0.0], np.full(action_dim, -1.0)]),
+                    high=np.concatenate([[1.0, 1.0], np.ones(action_dim)]),
+                    names=("step_progress", "last_action_success")
+                    + tuple(f"last_{n}" for n in self._action_space.names),
                 ),
             }
         )
@@ -189,7 +203,7 @@ class Physics3DEnvironment(BaseEnvironment):
         self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_success = 1.0
-        self._last_action = np.zeros(3)
+        self._last_action = np.zeros(action_dim)
         self._baseline_conf = 0.0
         self._baseline_bbox = (0.0, 0.0, 0.0, 0.0)
         self._baseline_class = config.target_class or ""
@@ -221,7 +235,7 @@ class Physics3DEnvironment(BaseEnvironment):
         attacker.position = self._body.position
         self._steps = 0
         self._last_success = 1.0
-        self._last_action = np.zeros(3)
+        self._last_action = np.zeros(self._action_space.n)
 
         clean = self._renderer.render(self._world.excluding("attacker"))
         detections = self._victim.detect(clean)
@@ -248,14 +262,12 @@ class Physics3DEnvironment(BaseEnvironment):
         return self.observe()
 
     def observe(self) -> Observation:
-        vector = np.array(
+        vector = np.concatenate(
             [
-                self._steps / max(1, self._config.max_steps),
-                self._last_success,
-                *self._last_action,
-            ],
-            dtype=np.float32,
-        )
+                [self._steps / max(1, self._config.max_steps), self._last_success],
+                self._last_action,
+            ]
+        ).astype(np.float32)
         return {
             "image": resize_rgb(self._frame, self._config.obs_size),
             "vector": vector,
@@ -272,10 +284,11 @@ class Physics3DEnvironment(BaseEnvironment):
 
         applied = self._action_space.clip(requested).astype(np.float64)
         out_of_range = not self._action_space.contains(requested)
+        movement, texture_params = applied[:3], applied[3:]
 
         outcome = integrate(
             self._body,
-            acceleration=applied * cfg.accel,
+            acceleration=movement * cfg.accel,
             obstacles=self._obstacle_boxes,
             bounds=self._bounds,
             dt=1.0,
@@ -284,7 +297,12 @@ class Physics3DEnvironment(BaseEnvironment):
         invalid = bool(out_of_range or outcome.collided)
         blocked = bool(invalid or outcome.hit_boundary)
 
-        self._world.attacker().position = self._body.position
+        # Same split as Stage 2: physics moves it, the agent patterns it.
+        attacker = self._world.attacker()
+        attacker.position = self._body.position
+        attacker.sprite = render_patch_from_params(
+            texture_params, cfg.texture_cells, _TEXTURE_BASE_SIZE
+        )
 
         self._frame = self._renderer.render(self._world)
         detections = self._victim.detect(self._frame)

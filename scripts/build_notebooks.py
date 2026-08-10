@@ -283,11 +283,15 @@ obs = api.reset(seed=0)
 baseline = env.pop_telemetry()               # experimenter-side telemetry
 print("clean detection:", baseline["baseline_class"], f"{baseline['baseline_confidence']:.3f}")
 
-# size is capped at the target's own width -- the patch can never be bigger
-# than the object it attacks (docs/DESIGN.md section 5)
+# size is capped at the target's own silhouette -- the patch can never be
+# bigger than the object it attacks (docs/DESIGN.md section 5)
 tx, ty = cfg["stage1"]["target_center"]
 max_size = api.action_space().high[2]
-obs, reward, terminated, truncated, info = api.step(np.array([tx, ty, max_size, 20.]))
+n_texture = api.action_space().n - 4
+texture = np.random.default_rng(0).uniform(0, 1, n_texture)  # a random pattern
+obs, reward, terminated, truncated, info = api.step(
+    np.concatenate([[tx, ty, max_size, 20.0], texture])
+)
 print("reward:", round(reward, 4), "| info:", info)
 """
         ),

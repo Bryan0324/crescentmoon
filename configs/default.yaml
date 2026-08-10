@@ -23,6 +23,14 @@ victim:
   device: cpu
   target_class: person
 
+# Shared by all stages: the attacker's board is not just placed, its pattern
+# is chosen too -- a texture_cells x texture_cells colour grid the agent
+# searches through the same Environment API as placement (still black-box,
+# gradient-free -- Rule 1). Kept small so Random/Greedy search and PPO can
+# actually explore it in a modest budget; 8 -> 192 params would not be.
+attack:
+  texture_cells: 3
+
 # One reward definition, shared by all stages (prompt.md section 12).
 reward:
   w_conf: 1.0

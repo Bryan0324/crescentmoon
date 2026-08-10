@@ -10,11 +10,12 @@ the victim model.
 
 The scene is a :class:`~environments.world.World` of independent objects --
 background, target, attacker -- exactly like Stage 2, just without physics
-driving the attacker: the agent's action *is* the attacker's placement for
-that step, instead of a push integrated by ``environments.physics``. Nothing
-in this module ever writes to the target's or the background's position or
-sprite; the only thing ``step()`` ever changes is the attacker's own object,
-and the only cross-object effect is occlusion by paint order (see
+driving the attacker: the agent's action *is* the attacker's placement (and,
+via a small colour-grid, its pattern) for that step, instead of a push
+integrated by ``environments.physics``. Nothing in this module ever writes to
+the target's or the background's position or sprite; the only thing
+``step()`` ever changes is the attacker's own object, and the only
+cross-object effect is occlusion by paint order (see
 ``rendering/renderer_2d.py``).
 """
 
@@ -29,7 +30,13 @@ import numpy as np
 from PIL import Image
 
 from models.victim import VictimModel
-from rendering.image_renderer import load_sprite, make_patch_texture, resize_rgb, silhouette_min_span
+from rendering.image_renderer import (
+    load_sprite,
+    render_patch_from_params,
+    resize_rgb,
+    silhouette_min_span,
+    texture_param_count,
+)
 from rendering.renderer_2d import Renderer2D, Renderer2DConfig, make_background
 from reward.attack_reward import AttackReward, RewardConfig
 
@@ -38,6 +45,8 @@ from .spaces import BoxSpace, DictSpace, ImageSpace
 from .world import World, WorldObject
 
 __all__ = ["ImageEnvConfig", "ImageEnvironment"]
+
+_PLACEMENT_NAMES = ("x", "y", "size", "rotation")
 
 
 @dataclass
@@ -50,7 +59,11 @@ class ImageEnvConfig:
     target_height: int = 250
     background_seed: int = 0
 
-    patch_seed: int = 0
+    #: The attacker's pattern is a `texture_cells x texture_cells` colour grid
+    #: the agent chooses every step (nearest-neighbour upscaled), not a fixed
+    #: texture -- small enough for black-box search/PPO to actually explore,
+    #: unlike full per-pixel control.
+    texture_cells: int = 3
     #: Patch side, as a fraction of the *target's own* narrower dimension --
     #: not of the canvas. A physical patch cannot be bigger than the object it
     #: attacks, so ``patch_max_frac`` must stay <= 1.0 (enforced in __init__):
@@ -97,7 +110,7 @@ def _build_world(config: ImageEnvConfig) -> World:
             kind="attacker",
             position=np.zeros(2),
             half_extents=np.array([1.0, 1.0]),
-            sprite=make_patch_texture(size=8, seed=config.patch_seed),  # replaced every step
+            sprite=Image.new("RGBA", (8, 8), (128, 128, 128, 255)),  # replaced every step
             movable=True,
         )
     )
@@ -122,12 +135,12 @@ class ImageEnvironment(BaseEnvironment):
         self._config = config
         self._victim = victim
         self._reward_fn = AttackReward(reward_config)
+        self._n_texture = texture_param_count(config.texture_cells)
 
         self._renderer = Renderer2D(
             Renderer2DConfig(width=config.render_size, height=config.render_size)
         )
         self._world = _build_world(config)
-        self._patch_texture = make_patch_texture(size=256, seed=config.patch_seed)
 
         # The patch's legal size is bounded by the target's own footprint, not
         # the canvas -- this is what makes "the attack cannot overtake the
@@ -147,34 +160,33 @@ class ImageEnvironment(BaseEnvironment):
         size_bound_dim = target_min_dim / rotation_safety
 
         canvas_side = float(config.render_size)
+        # Placement (x, y, size, rotation) + a small colour-grid texture: the
+        # agent searches the patch's *pattern* through the same Environment
+        # API it uses for placement, not just where to put a fixed board.
         self._action_space = BoxSpace(
-            low=np.array(
-                [0.0, 0.0, config.patch_min_frac * size_bound_dim, -config.max_rotation_deg]
-            ),
-            high=np.array(
+            low=np.concatenate(
                 [
-                    canvas_side,
-                    canvas_side,
-                    config.patch_max_frac * size_bound_dim,
-                    config.max_rotation_deg,
+                    [0.0, 0.0, config.patch_min_frac * size_bound_dim, -config.max_rotation_deg],
+                    np.zeros(self._n_texture),
                 ]
             ),
-            names=("x", "y", "size", "rotation"),
+            high=np.concatenate(
+                [
+                    [canvas_side, canvas_side, config.patch_max_frac * size_bound_dim, config.max_rotation_deg],
+                    np.ones(self._n_texture),
+                ]
+            ),
+            names=_PLACEMENT_NAMES + tuple(f"tex_{i}" for i in range(self._n_texture)),
         )
+        action_dim = self._action_space.n
         self._observation_space = DictSpace(
             {
                 "image": ImageSpace(config.obs_size, config.obs_size),
                 "vector": BoxSpace(
-                    low=np.array([0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
-                    high=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
-                    names=(
-                        "step_progress",
-                        "last_action_valid",
-                        "last_x_norm",
-                        "last_y_norm",
-                        "last_size_norm",
-                        "last_rotation_norm",
-                    ),
+                    low=np.concatenate([[0.0, 0.0], np.full(action_dim, -1.0)]),
+                    high=np.concatenate([[1.0, 1.0], np.ones(action_dim)]),
+                    names=("step_progress", "last_action_valid")
+                    + tuple(f"last_{n}_norm" for n in self._action_space.names),
                 ),
             }
         )
@@ -183,7 +195,7 @@ class ImageEnvironment(BaseEnvironment):
         self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_valid = 1.0
-        self._last_action_norm = np.zeros(4, dtype=np.float64)
+        self._last_action_norm = np.zeros(action_dim, dtype=np.float64)
         self._baseline_conf = 0.0
         self._baseline_bbox = (0.0, 0.0, 0.0, 0.0)
         self._baseline_class = config.target_class or ""
@@ -206,7 +218,7 @@ class ImageEnvironment(BaseEnvironment):
         self._frame = self._renderer.render(self._world.excluding("attacker"))
         self._steps = 0
         self._last_valid = 1.0
-        self._last_action_norm = np.zeros(4, dtype=np.float64)
+        self._last_action_norm = np.zeros(self._action_space.n, dtype=np.float64)
 
         detections = self._victim.detect(self._frame)
         target = detections.best(self._config.target_class) or detections.best()
@@ -230,14 +242,12 @@ class ImageEnvironment(BaseEnvironment):
 
     def observe(self) -> Observation:
         cfg = self._config
-        vector = np.array(
+        vector = np.concatenate(
             [
-                self._steps / max(1, cfg.max_steps),
-                self._last_valid,
-                *self._last_action_norm,
-            ],
-            dtype=np.float32,
-        )
+                [self._steps / max(1, cfg.max_steps), self._last_valid],
+                self._last_action_norm,
+            ]
+        ).astype(np.float32)
         return {
             "image": resize_rgb(self._frame, cfg.obs_size),
             "vector": vector,
@@ -254,12 +264,13 @@ class ImageEnvironment(BaseEnvironment):
         # --- the environment validates; the agent cannot bypass this ------
         applied = self._action_space.clip(requested).astype(np.float64)
         invalid = not self._action_space.contains(requested)
-        x, y, size, rotation = applied
+        x, y, size, rotation = applied[:4]
+        texture_params = applied[4:]
 
         # --- world update: only the attacker's own object changes --------
         side = max(1, int(round(size)))
         attacker = self._world.attacker()
-        attacker.sprite = self._patch_texture.resize((side, side), Image.BILINEAR)
+        attacker.sprite = render_patch_from_params(texture_params, cfg.texture_cells, side)
         attacker.position = np.array([x, y])
         attacker.half_extents = np.array([side / 2.0, side / 2.0])
         attacker.rotation_deg = float(rotation)

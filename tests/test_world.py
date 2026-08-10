@@ -116,11 +116,16 @@ def test_stage1_target_is_a_real_non_rectangular_cutout(image_env):
 def test_stage1_attacker_object_reflects_the_last_action(image_env):
     image_env.reset(seed=0)
     size = float(image_env.action_space().high[2])  # the legal maximum
-    image_env.step(np.array([120.0, 140.0, size, 15.0]))
+    n_texture = image_env.action_space().n - 4
+    texture = np.full(n_texture, 0.2)  # a dark grey pattern, easy to check for
+    image_env.step(np.concatenate([[120.0, 140.0, size, 15.0], texture]))
     attacker = image_env._world.attacker()
     assert np.allclose(attacker.position, [120.0, 140.0])
     assert attacker.rotation_deg == 15.0
     assert attacker.sprite.size == (round(size), round(size))
+    # the chosen texture, not a fixed/random one, actually got rendered
+    pixel = attacker.sprite.getpixel((attacker.sprite.width // 2, attacker.sprite.height // 2))
+    assert pixel[:3] == (round(0.2 * 255),) * 3
 
 
 # ---------------------------------------------------------------- boundary

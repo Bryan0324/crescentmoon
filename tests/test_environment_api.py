@@ -118,7 +118,7 @@ def test_physics_episodes_are_fixed_length(physics2d_env):
 
 def test_success_is_read_from_telemetry_not_from_terminated(physics2d_env):
     physics2d_env.reset(seed=0)
-    physics2d_env.step(np.zeros(2))
+    physics2d_env.step(np.zeros(physics2d_env.action_space().n))
     step = physics2d_env.pop_telemetry()["steps"][-1]
     assert "attack_success" in step and isinstance(step["attack_success"], bool)
 

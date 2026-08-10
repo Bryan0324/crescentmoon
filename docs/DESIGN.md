@@ -375,11 +375,59 @@ size 上限 = patch_max_frac × size_bound_dim
 `test_physics_attacker_patch_never_exceeds_the_targets_own_silhouette`，
 以及三個 `test_*_rejects_a_patch_*_frac_above_one`（確認 > 1.0 一定會被拒絕）。
 
-## 6. Renderer
+## 6. 攻擊者的圖案也是搜尋的一部分，不再是固定貼圖
 
-- `rendering/image_renderer.py` — patch 貼圖生成（固定 seed 的高對比色塊 + 噪點）
-  與合成；`load_sprite()` 讀取真實去背裁圖或退回一塊有 alpha 的合成 cutout。
-  patch 的**像素是固定的**，agent 優化的是放置。
+最初三個 stage 的 patch 貼圖都是**固定的**（`make_patch_texture(seed=...)`
+生成一次，之後只改變放置方式），agent 能優化的只有位置/大小/旋轉/推力。
+這其實砍掉了「對抗攻擊」裡最關鍵的一半：真實的 adversarial patch
+之所以有效，主要是**圖案本身**經過設計，不是單純遮住多少面積。實測也印證
+了這件事——把 patch 尺寸正確限制在 target 自己的輪廓內之後（見上一節），
+固定圖案的攻擊幾乎沒有效果了（Stage 2 的信心幾乎不動）：patch 一旦小到
+不能超出物件本身，遮擋面積就小到不足以單靠「擋住」造成什麼影響。
+
+修法不是放寬尺寸限制（那會違反上一節才修好的邊界規則），而是把 patch 的
+**圖案**也變成 agent 透過 Environment API 可以搜尋的東西：
+
+```python
+# rendering/image_renderer.py::render_patch_from_params
+輸入：texture_cells × texture_cells × 3 個 [0,1] 的數字（一個粗網格，每格一組 RGB）
+輸出：nearest-neighbour 放大到 patch 實際尺寸的 RGBA 圖（不透明）
+```
+
+三個 stage 的 action space 因此都多了 `texture_cells² × 3` 維（預設
+`texture_cells = 3` → 27 維，設定在 `configs/default.yaml` 的
+`attack.texture_cells`，三個 stage 共用同一個值）：
+
+- **Stage 1**：`(x, y, size, rotation, tex_0, ..., tex_26)`。
+- **Stage 2**：`(dx, dy, tex_0, ..., tex_26)`——推力仍然只用前兩維算
+  `physics.integrate()` 的加速度；圖案不參與物理，只影響
+  `attacker.sprite`。
+- **Stage 3**：`(dx, dy, dz, tex_0, ..., tex_26)`，同樣的切法。
+
+這仍然完全符合 Rule 1：agent 選的是一組數字，Environment 把這組數字
+渲染成貼圖、合成進場景、跑 YOLO、算出一個純量 reward 回傳——agent 從頭到尾
+沒有拿到 victim 的 gradient 或 feature，只是**搜尋空間變大了**（多了圖案），
+不是存取權限變大了。這是黑箱、無梯度的搜尋，不是真正的 gradient-based
+adversarial optimization（那需要對 victim 微分，違反 Rule 1）。
+
+**為什麼是粗網格，不是逐像素**：一張 patch 若是 256×256，逐像素控制就是
+196608 維——Random/Greedy 搜尋、甚至 PPO 在這個專案的預算下都不可能有效
+探索這麼大的空間。`texture_cells=3`（27 維）在「圖案有意義的自由度」和
+「搜尋預算內可探索」之間取一個小型專題該有的平衡。
+
+`agents/*.py` 完全不用改：`RandomAgent`/`GreedyAgent`/`PPOAgent` 都只透過
+`action_space()` 操作，維度變大對它們是透明的——這也再次驗證了
+「Agent environment-agnostic」的設計（第 8 節）。
+
+`tests/test_world.py::test_stage1_attacker_object_reflects_the_last_action`
+額外斷言：送進去的圖案參數，真的會被渲染進 `attacker.sprite` 的像素裡。
+
+## 7. Renderer
+
+- `rendering/image_renderer.py` — `render_patch_from_params()` 從 agent
+  選的圖案參數生成 patch 貼圖；`load_sprite()` 讀取真實去背裁圖或退回一塊
+  有 alpha 的合成 cutout。patch 的**像素現在由 agent 的 action 決定**，
+  不再是寫死的貼圖。
 - `rendering/renderer_2d.py` — world 座標就是相機像素座標。
   完全由 `World` 驅動，包含背景：background/target/obstacle/attacker
   都是 `world.objects` 裡的一個物件，依 `WorldObject.paint_order`
@@ -403,7 +451,7 @@ YOLO 會偵測到一堆其他物件，reward 訊號會被汙染。
 
 ---
 
-## 7. Victim model
+## 8. Victim model
 
 `models/yolo_victim.py`：Ultralytics YOLO，`eval()` + `requires_grad_(False)`，
 只透過 `detect(image_rgb) -> Detections` 對外。
@@ -418,7 +466,7 @@ YOLO 會偵測到一堆其他物件，reward 訊號會被汙染。
 
 ---
 
-## 8. Agents
+## 9. Agents
 
 三個 agent 都只需要 `action_space()` 和純量 reward：
 
@@ -433,7 +481,7 @@ YOLO 會偵測到一堆其他物件，reward 訊號會被汙染。
 
 ---
 
-## 9. 實驗流程
+## 10. 實驗流程
 
 `evaluation/runner.py::run_episodes` 是唯一的實驗迴圈：
 它持有真正的 env（拿 telemetry 畫圖），但只把 `seal(env)` 的結果餵給 agent。
@@ -445,9 +493,11 @@ YOLO 會偵測到一堆其他物件，reward 訊號會被汙染。
 
 ---
 
-## 10. 刻意沒做的事
+## 11. 刻意沒做的事
 
 - 沒有做 white-box 梯度攻擊（違反 Rule 1 的精神）。
+- 沒有讓 agent 逐像素控制 patch 圖案——`texture_cells` 粗網格是刻意的
+  取捨，逐像素是一個 Random/Greedy/PPO 在這個預算下都探索不完的搜尋空間。
 - 沒有訓練或微調 YOLO。
 - 沒有自己實作 PPO。
 - 沒有多 agent、沒有分散式 RL、沒有大型 dataset。
