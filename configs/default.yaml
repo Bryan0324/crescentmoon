@@ -14,6 +14,11 @@ assets:
   # these; Stage 2/3 compose several -- target + obstacle(s) -- into one scene.
   objects_dir: assets/objects
   objects_index: assets/objects.json
+  # Each source photo's own backdrop, with every detected instance (kept or
+  # rejected) painted out -- Stage 2 composes real cutouts onto this instead
+  # of a synthetic sky/ground gradient. Picked automatically by whichever
+  # source photo the stage's target object came from.
+  backgrounds_dir: assets/backgrounds
 
 victim:
   kind: yolo              # yolo | colorblob  (colorblob = offline toy detector)
@@ -69,14 +74,21 @@ stage2:
   target_center: [192.0, 215.0]
   target_height: 190
   patch_frac: 0.8          # patch side, as a fraction of the target's own narrower dimension
-  spawn_center: [70.0, 320.0]
-  spawn_jitter: 35.0
+  # The attacker can only ever push the patch within the target's own
+  # bounding box (see Physics2DEnvironment._bounds) -- spawn_center/jitter
+  # below must land inside it: target_center [192, 215] +/- half [37, 95].
+  spawn_center: [205.0, 150.0]
+  spawn_jitter: 15.0
   # The scene is composed of several real, background-removed objects, not
   # placeholder rectangles -- each obstacle is another object from the
-  # library, placed like the target (its own center + display height).
+  # library, placed like the target (its own center + display height). This
+  # one stands partly in front of the target's lower-left, inside the
+  # target's own bounding box, so it genuinely blocks part of the attacker's
+  # (now target-bounded) reachable area instead of sitting off to the side
+  # where the attacker could never reach it anyway.
   obstacles:               # used by the "obstacle" variant only
     - object: person_1
-      center: [90.0, 310.0]
+      center: [175.0, 260.0]
       height: 100.0
   # Fixed-length episodes: ending early on success would pay less than hovering
   # just above the success threshold, and the agent would learn to hover.

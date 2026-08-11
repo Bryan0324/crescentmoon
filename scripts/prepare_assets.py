@@ -25,6 +25,10 @@
    attacker could hold up or place -- it would not read as one object.
 4. Save each surviving cutout under ``assets/objects/<class>_<n>.png`` and
    record it in ``assets/objects.json``.
+5. Also save each source photo's own backdrop under
+   ``assets/backgrounds/<source>.png``, with every detected instance (kept or
+   rejected) painted out via inpainting -- a real photo background for Stage 2
+   to compose cutouts onto, instead of a synthetic sky/ground gradient.
 
 Stage 1 attacks exactly one of these objects (see ``stage1.target_object`` in
 configs/default.yaml). Stage 2/3 compose several -- a target plus one or more
@@ -97,6 +101,47 @@ def download(dest: Path, urls: list[str]) -> bool:
     return False
 
 
+def build_background_plate(photo: Path, model, remove_classes: set[str]) -> Image.Image:
+    """The photo's own backdrop, with every instance of ``remove_classes``
+    painted out.
+
+    Stage 2 composes real object cutouts onto this instead of a synthetic sky
+    gradient -- a real photo, but without instances of the *target's own
+    class* left behind in it. Two reasons to remove exactly those and nothing
+    else: (1) the target/obstacle cutouts are themselves instances of this
+    photo, so leaving the class in would show an object standing right next
+    to its own original self once repositioned; (2) any leftover same-class
+    instance would compete with our composited target when the environment
+    picks "the" target by highest confidence at reset. A large,
+    unrelated-class object (e.g. a bus behind our people) is left alone --
+    inpainting a hole that big looks far worse than a bus in the background
+    does, and it isn't the class anything gets matched against.
+    """
+    import cv2
+
+    image = load_rgb(photo)
+    results = model.predict(image[:, :, ::-1], conf=MIN_CONFIDENCE, verbose=False)[0]
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    if results.masks is not None:
+        names = model.names
+        for i, inst_mask in enumerate(results.masks.data.cpu().numpy()):
+            cls_name = names.get(int(results.boxes.cls[i]), "")
+            if cls_name not in remove_classes:
+                continue
+            resized = np.asarray(
+                Image.fromarray((inst_mask * 255).astype(np.uint8)).resize(
+                    (image.shape[1], image.shape[0]), Image.BILINEAR
+                )
+            )
+            mask = np.maximum(mask, resized)
+    if not np.any(mask):
+        return Image.fromarray(image)
+    # Dilate so the inpaint also covers each mask's antialiased edge halo.
+    mask = cv2.dilate((mask > 32).astype(np.uint8) * 255, np.ones((11, 11), np.uint8))
+    inpainted = cv2.inpaint(image, mask, 9, cv2.INPAINT_TELEA)
+    return Image.fromarray(inpainted)
+
+
 def synthesize_source(dest: Path, seed: int) -> None:
     """Offline fallback source photo -- only ever fed to the segmenter."""
     from rendering.renderer_2d import make_background
@@ -156,11 +201,15 @@ def segment_all_instances(photo: Path, source_name: str, model) -> list[dict]:
     return out
 
 
-def build_offline_library(objects_dir: Path, index_path: Path) -> list[dict]:
+def build_offline_library(objects_dir: Path, index_path: Path, backgrounds_dir: Path) -> list[dict]:
     """Two non-rectangular synthetic cutouts of different 'classes' -- enough
     for Stage 2/3 to compose a target + an obstacle with no network access."""
     print("[assets] building a synthetic object library instead (offline fallback)")
     objects_dir.mkdir(parents=True, exist_ok=True)
+    backgrounds_dir.mkdir(parents=True, exist_ok=True)
+    from rendering.renderer_2d import make_background
+
+    make_background(512, 512, seed=0).convert("RGB").save(backgrounds_dir / "offline.png")
     shapes = [("target", (0, 200, 0), "ellipse"), ("obstacle", (90, 95, 105), "rectangle")]
 
     entries = []
@@ -186,11 +235,18 @@ def build_offline_library(objects_dir: Path, index_path: Path) -> list[dict]:
 def build_library(cfg: dict, force: bool) -> list[dict]:
     objects_dir = resolve(cfg["assets"]["objects_dir"])
     index_path = resolve(cfg["assets"]["objects_index"])
+    backgrounds_dir = resolve(cfg["assets"].get("backgrounds_dir", "assets/backgrounds"))
     objects_dir.mkdir(parents=True, exist_ok=True)
+    backgrounds_dir.mkdir(parents=True, exist_ok=True)
 
     if index_path.exists() and not force:
-        print(f"[assets] library already present: {index_path}")
-        return json.loads(index_path.read_text(encoding="utf-8"))
+        entries = json.loads(index_path.read_text(encoding="utf-8"))
+        have = {p.stem for p in backgrounds_dir.glob("*.png")}
+        need = {e["source"] for e in entries}
+        if need <= have:
+            print(f"[assets] library already present: {index_path}")
+            return entries
+        print(f"[assets] object library present but background plate(s) missing ({need - have}) -- rebuilding")
 
     try:
         from ultralytics import YOLO
@@ -198,17 +254,22 @@ def build_library(cfg: dict, force: bool) -> list[dict]:
         model = YOLO(SEG_WEIGHTS)
     except Exception as exc:  # pragma: no cover - typically a download failure
         print(f"[assets] segmentation unavailable ({exc})")
-        return build_offline_library(objects_dir, index_path)
+        return build_offline_library(objects_dir, index_path, backgrounds_dir)
 
     entries: list[dict] = []
     counters: dict[str, int] = {}
     source_dir = resolve(cfg["assets"]["source_dir"])
+    remove_classes = {cfg.get("victim", {}).get("target_class", "person")}
 
     for name, urls in SOURCE_PHOTOS.items():
         photo = source_dir / f"{name}.jpg"
         if not photo.exists():
             if not download(photo, urls):
                 synthesize_source(photo, seed=hash(name) % 97)
+
+        plate = build_background_plate(photo, model, remove_classes)
+        plate.save(backgrounds_dir / f"{name}.png")
+        print(f"[assets] background plate <- {name}.jpg (detected instances inpainted out)")
 
         for inst in segment_all_instances(photo, name, model):
             cls = inst["class"]
@@ -229,7 +290,7 @@ def build_library(cfg: dict, force: bool) -> list[dict]:
 
     if not entries:
         print("[assets] segmentation found nothing usable in any source photo")
-        return build_offline_library(objects_dir, index_path)
+        return build_offline_library(objects_dir, index_path, backgrounds_dir)
 
     index_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
     return entries

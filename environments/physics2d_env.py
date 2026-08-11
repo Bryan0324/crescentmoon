@@ -24,6 +24,7 @@ from PIL import Image
 
 from models.victim import VictimModel
 from rendering.image_renderer import (
+    fit_square,
     load_sprite,
     render_patch_from_params,
     resize_rgb,
@@ -72,6 +73,10 @@ class Physics2DEnvConfig:
     #: to push it.
     texture_cells: int = 3
     background_seed: int = 0
+    #: A real photo backdrop -- the source photo the target/obstacles were cut
+    #: from, background-only (see scripts/prepare_assets.py). ``None`` falls
+    #: back to the synthetic sky/ground gradient (``background_seed``).
+    background_path: str | None = None
 
     max_steps: int = 40
     accel: float = 10.0        # world units / tick^2 at |action| = 1
@@ -100,7 +105,12 @@ def _build_world(config: Physics2DEnvConfig) -> World:
     world = World()
 
     size = (config.render_size, config.render_size)
-    background = make_background(*size, config.background_seed).convert("RGBA")
+    if config.background_path:
+        with Image.open(config.background_path) as photo:
+            background = fit_square(photo.convert("RGB"), config.render_size)
+    else:
+        background = make_background(*size, config.background_seed)
+    background = background.convert("RGBA")
     world.add(
         WorldObject(
             id="background",
@@ -184,9 +194,15 @@ class Physics2DEnvironment(BaseEnvironment):
         self._obstacle_boxes = [
             AABB.from_center(obj.position, obj.half_extents) for obj in self._world.obstacles()
         ]
-        self._bounds = AABB(
-            np.zeros(2), np.array([config.render_size, config.render_size], dtype=float)
-        )
+        # A physical patch must stay on the object it attacks -- it cannot
+        # drift off into open background or onto a different object. Bounding
+        # the *push*, not just the patch's size, to the target's own footprint
+        # is what makes that structural: ``integrate`` already clamps position
+        # to ``bounds`` every tick (the same mechanism Stage 1 uses for
+        # placement), so there is no action that can push the attacker past
+        # the target's own edges.
+        target = self._world.target()
+        self._bounds = AABB.from_center(target.position, target.half_extents)
 
         # Movement (dx, dy) + a small colour-grid texture: the agent searches
         # the patch's *pattern* through the same action it uses to push it,

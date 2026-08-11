@@ -194,6 +194,30 @@ def test_physics_attacker_patch_never_exceeds_the_targets_own_silhouette(env_nam
     assert attacker_size <= target_min_dim + 1e-6
 
 
+@pytest.mark.parametrize("env_name", ["physics2d_env", "physics2d_env_obstacles"])
+def test_physics2d_attacker_never_leaves_the_targets_own_footprint(env_name, request):
+    """"攻擊不能越界": a physical patch stays on the one object it attacks -- it
+    cannot be pushed off into open background or onto a different object.
+    Bounded at the push (``Physics2DEnvironment._bounds``), not just checked
+    after the fact, so no sequence of actions can escape it."""
+    env = request.getfixturevalue(env_name)
+    env.reset(seed=0)
+    target = env._world.target()
+    target_lo = target.position - target.half_extents
+    target_hi = target.position + target.half_extents
+
+    rng = np.random.default_rng(0)
+    n_texture = env.action_space().n - 2
+    for _ in range(50):
+        push = np.concatenate([rng.uniform(-1.0, 1.0, size=2), rng.uniform(0.0, 1.0, size=n_texture)])
+        env.step(push)
+        attacker = env._world.attacker()
+        attacker_lo = attacker.position - attacker.half_extents
+        attacker_hi = attacker.position + attacker.half_extents
+        assert np.all(attacker_lo >= target_lo - 1e-6)
+        assert np.all(attacker_hi <= target_hi + 1e-6)
+
+
 def test_physics2d_rejects_a_patch_frac_above_one(victim):
     from environments.physics2d_env import Physics2DEnvConfig, Physics2DEnvironment
 

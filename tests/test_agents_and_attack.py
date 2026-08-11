@@ -71,7 +71,9 @@ def test_obstacles_restrict_where_the_attacker_can_go(
         env.reset(seed=0)
         start = None
         end = None
-        push = np.concatenate([[0.6, -0.8], np.zeros(env.action_space().n - 2)])
+        # Straight down, from a spawn above the target's midline, toward the
+        # obstacle placed over the target's lower half.
+        push = np.concatenate([[0.0, 0.8], np.zeros(env.action_space().n - 2)])
         for _ in range(8):
             _, _, terminated, truncated, _ = env.step(push)
             if terminated or truncated:

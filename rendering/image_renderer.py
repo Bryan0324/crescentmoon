@@ -16,6 +16,7 @@ __all__ = [
     "save_rgb",
     "to_pil",
     "resize_rgb",
+    "fit_square",
     "make_patch_texture",
     "load_sprite",
     "silhouette_min_span",
@@ -43,6 +44,20 @@ def resize_rgb(image_rgb: np.ndarray, size: int | tuple[int, int]) -> np.ndarray
         size = (size, size)
     with to_pil(image_rgb) as im:
         return np.asarray(im.resize(size, Image.BILINEAR), dtype=np.uint8)
+
+
+def fit_square(image: Image.Image, size: int) -> Image.Image:
+    """Centre-crop ``image`` to a square, then resize to ``size`` x ``size``.
+
+    Used to turn a real (non-square) source photo into a backdrop the same
+    shape as the render canvas without stretching it -- a plain resize would
+    distort a portrait photo's proportions.
+    """
+    width, height = image.size
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    return image.crop((left, top, left + side, top + side)).resize((size, size), Image.BILINEAR)
 
 
 def make_patch_texture(size: int = 128, seed: int = 0, cells: int = 8) -> Image.Image:

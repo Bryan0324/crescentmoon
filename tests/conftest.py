@@ -80,7 +80,9 @@ def physics2d_env(victim) -> Physics2DEnvironment:
             target_center=(96.0, 105.0),
             target_height=95,
             max_steps=8,
-            spawn_center=(40.0, 160.0),
+            # Movement is bounded to the target's own footprint (roughly
+            # x:[72,120] y:[58,152] at this size) -- spawn well inside it.
+            spawn_center=(96.0, 70.0),
             spawn_jitter=5.0,
         ),
         victim=victim,
@@ -97,8 +99,12 @@ def physics2d_env_obstacles(victim, synthetic_obstacle_sprite) -> Physics2DEnvir
             target_center=(96.0, 105.0),
             target_height=95,
             max_steps=8,
-            spawn_center=(40.0, 160.0),
+            spawn_center=(96.0, 70.0),
             spawn_jitter=5.0,
+            # Placed to overlap the lower half of the target's own bounding
+            # box, so it actually sits inside the attacker's now target-bounded
+            # reachable area instead of off to the side where it could never
+            # be reached (and so never block anything).
             obstacles=[
                 ObstacleSpec(sprite_path=str(synthetic_obstacle_sprite), center=(95.0, 147.5), height=55.0)
             ],

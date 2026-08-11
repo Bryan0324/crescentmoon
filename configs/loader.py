@@ -105,6 +105,18 @@ def _texture_cells(cfg: dict[str, Any]) -> int:
     return int(cfg.get("attack", {}).get("texture_cells", 3))
 
 
+def _background_path(cfg: dict[str, Any], library: ObjectLibrary, ref: str) -> str | None:
+    """The real photo ``ref`` (the target object) was cut from, backdrop only
+    -- see ``scripts/prepare_assets.py``. ``None`` falls back to a synthetic
+    gradient when the library or the plate isn't available yet."""
+    if len(library) == 0:
+        return None
+    source = library.resolve(ref).source
+    backgrounds_dir = resolve(cfg["assets"].get("backgrounds_dir", "assets/backgrounds"))
+    path = backgrounds_dir / f"{source}.png"
+    return str(path) if path.exists() else None
+
+
 # ----------------------------------------------------------------------
 def build_stage1_env(cfg: dict[str, Any], victim: VictimModel) -> ImageEnvironment:
     s = cfg["stage1"]
@@ -154,6 +166,7 @@ def build_stage2_env(
             target_center=tuple(s["target_center"]),
             target_height=int(s["target_height"]),
             target_sprite_path=_sprite_path(library, s["target_object"]),
+            background_path=_background_path(cfg, library, s["target_object"]),
             patch_frac=float(s["patch_frac"]),
             texture_cells=_texture_cells(cfg),
             max_steps=int(s["max_steps"]),

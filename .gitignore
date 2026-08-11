@@ -11,6 +11,7 @@ yolov8n.pt
 assets/source/
 assets/objects/
 assets/objects.json
+assets/backgrounds/
 
 # scratch output of scripts/check_project.py
 results/_check/
